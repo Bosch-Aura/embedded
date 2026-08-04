@@ -9,6 +9,39 @@
 
 ---
 
+## 0. Estado de implementación (2026-08-04)
+
+Rama `fix/plan-mejoras-fase0-fase2`. **Compila; NO probado en hardware.**
+
+| Fase | Hallazgos | Estado |
+|---|---|---|
+| **Fase 0** | C-2, C-1, C-3, C-5, A-8, M-1, C-4 | ✅ **Implementada completa** |
+| **Fase 1** | A-11, A-6, A-3, A-9, A-12, A-5, A-10 | ✅ **Implementada completa** |
+| **Fase 2** | ítems 15-18 (A-13, M-10, A-1 doc, M-4/M-5/B-5) | ✅ Implementada (documentación) |
+| **Fase 3** | A-2, A-1 (código), A-4, A-7, M-2, M-3, M-5…M-14, B-1…B-7 | ❌ No implementada |
+
+**Adelantados desde Fase 3** (por ser dependencias directas de Fase 0/1):
+- **M-12** — `*expired` siempre inicializado en `mailbox_read` (`src/mailbox.cpp`). Con C-1, un
+  timeout de mutex ahora significa "frenar", que es el comportamiento correcto.
+- **M-10** (parcial) — eliminado `DEFAULT_FORWARD_SPEED`, código muerto que sostenía C-1.
+
+**Añadidos no previstos por el plan, requeridos por los cambios de Fase 0:**
+- `src/webpage.cpp`: botones ARM / DISARM / E-STOP y visor de estado. Sin esto la UI web
+  quedaba inutilizable tras C-3 (arranque `DISARMED`) porque **no existía ningún botón de armado**.
+- `src/webpage.cpp`: keep-alive a 10 Hz del comando de velocidad. Tras C-1 los comandos
+  expiran a los 200 ms y el auto frena; la UI enviaba un único AJAX por movimiento de slider.
+- `src/web_task.cpp`: `supervisor_update_heartbeat()` en los handlers de control, exigido
+  explícitamente por la nota de C-4.
+
+**Pendiente de acción humana:**
+- **A-10** — `include/wifi_data.h` sigue en el historial de git y en los clones existentes.
+  **Hay que rotar la clave de la red `UA-Alumnos` a mano.** Borrar el archivo no basta.
+- **A-11** — el cambio de UART1 a GPIO 16/17 **requiere recablear** el enlace con la Jetson.
+- **A-13** — al corregir el rango del servo, el auto girará más a la derecha que antes con
+  los mismos grados: **recalibrar el lazo de seguimiento de carril** y avisar al equipo Brain.
+
+---
+
 ## 1. Resumen ejecutivo
 
 Se revisó la totalidad del código fuente (2052 líneas, 12 `.cpp` + 5 `.h`). Se identificaron **39 hallazgos**: 5 críticos, 13 altos, 14 medios y 7 bajos.
