@@ -1,0 +1,6 @@
+// Template for local Wi-Fi credentials.
+//
+// Copy this file to include/wifi_data.h and fill in your own values.
+// include/wifi_data.h is git-ignored on purpose: NEVER commit real credentials.
+#define SSID "your-network-ssid"
+#define PASSWORD "your-network-password"

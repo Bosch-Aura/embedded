@@ -9,11 +9,27 @@
 
 #define MOTOR_TASK_PERIOD_MS 10 // 100 Hz
 #define EMERGENCY_NOTIFICATION_BIT (1 << 0)
-#define DEFAULT_FORWARD_SPEED 220 // Default speed when no command received (0-255)
 #define STOP_COOLDOWN_MS 5000 // 5 seconds cooldown after stop
 
 static mailbox_t *motor_mailbox = NULL;
 static TaskHandle_t motor_task_handle = NULL;
+
+// C-1: single authorization helper, used both for fresh commands and for the
+// no-command fallback. Traction is only allowed in states where the vehicle is
+// actually supposed to be able to move.
+static bool motor_control_allowed(void)
+{
+    system_state_t state = supervisor_get_state();
+    system_mode_t mode = supervisor_get_mode();
+
+    if (mode == MODE_AUTO)
+    {
+        // In AUTO mode, need to be RUNNING
+        return (state == STATE_RUNNING);
+    }
+    // In MANUAL mode, ARMED is enough
+    return (state == STATE_ARMED || state == STATE_RUNNING);
+}
 
 void motor_task(void *pvParameters)
 {
@@ -21,13 +37,12 @@ void motor_task(void *pvParameters)
     motor_task_handle = xTaskGetCurrentTaskHandle();
 
     uint8_t current_speed = 0;
-    uint8_t last_valid_speed = 0; // Store last valid speed command
-    bool has_received_speed_command = false; // Track if we've ever received a speed command
     bool motor_direction = true; // forward
     bool has_valid_command = false;
     uint32_t last_stop_timestamp = 0;
     bool in_cooldown = false;
     int32_t last_ignored_speed = -1; // Track last ignored speed command to avoid repeated logs
+    int32_t last_reported_speed = -1; // Track last speed reported over the link to avoid repeated logs
 
     Serial.println("[MotorTask] Motor task started");
 
@@ -45,8 +60,8 @@ void motor_task(void *pvParameters)
             motor_stop();
             lights_set_reverse(false);
             current_speed = 0;
+            last_reported_speed = 0;
             has_valid_command = false;
-            // Don't reset last_valid_speed or has_received_speed_command - keep them for after cooldown
             last_stop_timestamp = current_time;
             in_cooldown = true;
             Serial.println("[MotorTask] 5 second cooldown started");
@@ -91,19 +106,7 @@ void motor_task(void *pvParameters)
                 {
                 case CMD_SET_SPEED: {
                     // Check system state before allowing speed commands
-                    system_state_t state = supervisor_get_state();
-                    system_mode_t mode = supervisor_get_mode();
-                    bool can_control = false;
-                    
-                    if (mode == MODE_AUTO) {
-                        // In AUTO mode, need to be RUNNING
-                        can_control = (state == STATE_RUNNING);
-                    } else {
-                        // In MANUAL mode, ARMED is enough
-                        can_control = (state == STATE_ARMED || state == STATE_RUNNING);
-                    }
-                    
-                    if (!can_control) {
+                    if (!motor_control_allowed()) {
                         // Only print if this is a different command than the last ignored one
                         if (last_ignored_speed != value) {
                             Serial.println("[MotorTask] SET_SPEED ignored - system DISARMED");
@@ -124,33 +127,31 @@ void motor_task(void *pvParameters)
                     {
                         // Reset ignored tracking when command can be executed
                         last_ignored_speed = -1;
-                        uint8_t new_speed = (uint8_t)value;
-                        if (new_speed > MOTOR_SPEED_MAX)
+                        // C-5: clamp in the SIGNED type, before narrowing to uint8_t.
+                        // Casting first would turn -1 into 255 (full speed) and 300 into 44.
+                        if (value < 0)
                         {
-                            new_speed = MOTOR_SPEED_MAX;
+                            value = 0;
                         }
-                        // Only execute and print if speed actually changed
-                        if (new_speed != current_speed)
+                        else if (value > MOTOR_SPEED_MAX)
                         {
-                            current_speed = new_speed;
-                            last_valid_speed = current_speed; // Store last valid speed
-                            has_received_speed_command = true; // Mark that we've received a speed command
-                            // Ensure forward direction when setting speed
-                            motor_set_direction(true);
-                            motor_set_speed(current_speed);
-                            motor_direction = true;
-                            lights_set_reverse(false);
+                            value = MOTOR_SPEED_MAX;
+                        }
+                        uint8_t new_speed = (uint8_t)value;
+
+                        current_speed = new_speed;
+                        // Ensure forward direction when setting speed
+                        motor_set_direction(true);
+                        motor_set_speed(current_speed);
+                        motor_direction = true;
+                        lights_set_reverse(false);
+                        // Only print if the applied speed actually changed
+                        if ((int32_t)current_speed != last_reported_speed)
+                        {
+                            last_reported_speed = current_speed;
                             Serial.print("EVENT:CMD_EXECUTED:SET_SPEED:");
                             Serial.println(current_speed);
                             Serial.flush();
-                        } else {
-                            // Speed didn't change, but still update last_valid_speed and flags
-                            last_valid_speed = current_speed;
-                            has_received_speed_command = true;
-                            motor_set_direction(true);
-                            motor_set_speed(current_speed);
-                            motor_direction = true;
-                            lights_set_reverse(false);
                         }
                     }
                     break;
@@ -163,8 +164,8 @@ void motor_task(void *pvParameters)
                     motor_stop();
                     lights_set_reverse(false);
                     current_speed = 0;
+                    last_reported_speed = 0;
                     motor_direction = true;
-                    // Don't reset last_valid_speed or has_received_speed_command - keep them for after cooldown
                     last_stop_timestamp = current_time;
                     in_cooldown = true;
                     Serial.println("[MotorTask] Motor stopped (brake/stop command), 5 second cooldown started");
@@ -176,31 +177,32 @@ void motor_task(void *pvParameters)
             }
         }
 
-        // Apply motor control based on state
-        if (in_cooldown)
+        // Apply motor control based on state.
+        // C-1: FAIL-SAFE. Anything other than "fresh AND authorized command"
+        // means brake. The whole loop is guarded by the system state, not only
+        // the CMD_SET_SPEED branch, so DISARM/FAULT stop the vehicle for good
+        // and an expired command never re-applies the last speed.
+        if (in_cooldown || !motor_control_allowed())
         {
-            // Ensure motor stays stopped during cooldown
+            // Ensure motor stays stopped during cooldown / while not authorized
             motor_stop();
             current_speed = 0;
+            last_reported_speed = 0;
+            motor_direction = true;
+            lights_set_reverse(false);
         }
         else if (has_valid_command)
         {
             // Valid command is already applied above, nothing to do here
         }
-        else if (has_received_speed_command)
-        {
-            // Command expired, but maintain last valid speed (don't revert to default)
-            current_speed = last_valid_speed;
-            motor_set_direction(true);
-            motor_set_speed(current_speed);
-            motor_direction = true;
-            lights_set_reverse(false);
-        }
         else
         {
-            // No speed command ever received, stop the motor
+            // No fresh command in the mailbox (expired, or link lost): brake.
+            // NEVER hold the last valid speed - that is what made the vehicle
+            // restart by itself 5 s after an emergency stop.
             motor_stop();
             current_speed = 0;
+            last_reported_speed = 0;
             motor_direction = true;
             lights_set_reverse(false);
         }

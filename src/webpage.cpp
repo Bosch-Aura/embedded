@@ -101,6 +101,13 @@ const char *webpage = R"html(
   </head>
   <body style="height: 100vh; background-color: white; display: flex; align-items: center; justify-content: center;">
     <div class="cont" style="display: grid; grid-template-columns: repeat(3); grid-template-rows: repeat(3);">
+      <!--Arm / Disarm / E-STOP. The system boots DISARMED (C-3): nothing moves until ARM.-->
+      <div style="grid-row: 0; grid-column: 1 / span 3; text-align: center; margin-bottom: 10px;">
+        <button class="btn btn-success btn-lg" style="font-size: 1.1rem; padding: 10px 18px" onclick='makeAjaxCall("arm")'>ARMAR</button>
+        <button class="btn btn-secondary btn-lg" style="font-size: 1.1rem; padding: 10px 18px" onclick='makeAjaxCall("disarm")'>DESARMAR</button>
+        <button class="btn btn-danger btn-lg" style="font-size: 1.1rem; padding: 10px 18px" onclick='emergencyBrake()'>E-STOP</button>
+        <div id="system-status" style="margin-top: 6px; font-weight: bold;">Estado: --</div>
+      </div>
       <!--LightsOff-->
       <div style="grid-row: 1; grid-column: 1; text-align: center; margin-bottom: 10px;">
         <button title="lightOff" class="btn btn-warning btn-lg btn-animate" style="font-size: 1.5rem; padding: 20px 25px" ontouchstart='makeAjaxCall("LightsOff")'>
@@ -246,24 +253,51 @@ const char *webpage = R"html(
       // Note: slider vertical with writing-mode bt-lr has min at top, max at bottom
       // So we invert the value: positive slider value = backward, negative = forward
       // We'll invert it so top = forward (positive), bottom = backward (negative)
+      let lastSpeedCall = 'changeSpeed?speed=0';
+
       function updateSpeed(value) {
         const sliderValue = parseInt(value);
         // Invert: slider goes -255 (top) to 255 (bottom), but we want top=forward, bottom=backward
         const speed = -sliderValue; // Invert so top (slider -255) becomes forward (+255)
         const speedDisplay = document.getElementById('speed-display');
-        
+
         if (speed === 0) {
           speedDisplay.textContent = 'Detenido: 0';
-          makeAjaxCall('changeSpeed?speed=0');
+          lastSpeedCall = 'changeSpeed?speed=0';
         } else if (speed > 0) {
           speedDisplay.textContent = 'Adelante: ' + speed;
-          makeAjaxCall('changeSpeed?speed=' + speed + '&direction=forward');
+          lastSpeedCall = 'changeSpeed?speed=' + speed + '&direction=forward';
         } else {
           speedDisplay.textContent = 'Atrás: ' + Math.abs(speed);
-          makeAjaxCall('changeSpeed?speed=' + Math.abs(speed) + '&direction=backward');
+          lastSpeedCall = 'changeSpeed?speed=' + Math.abs(speed) + '&direction=backward';
         }
+        makeAjaxCall(lastSpeedCall);
       }
-      
+
+      function emergencyBrake() {
+        const speedSlider = document.getElementById('speed-slider-vertical');
+        if (speedSlider) { speedSlider.value = 0; }
+        lastSpeedCall = 'changeSpeed?speed=0';
+        document.getElementById('speed-display').textContent = 'Detenido: 0';
+        makeAjaxCall('brake');
+      }
+
+      // Keep-alive. Motor commands now expire after CONTROL_CMD_TTL_MS (200 ms) and the
+      // vehicle brakes (C-1), and the MANUAL watchdog faults after 1 s without a heartbeat
+      // (C-4). Re-sending the current speed at 10 Hz is what keeps web control alive; if
+      // the browser is closed or the Wi-Fi drops, the car stops on its own. That is the
+      // intended fail-safe, not a bug.
+      setInterval(function() { makeAjaxCall(lastSpeedCall); }, 100);
+
+      // Poll the system state so the operator can see whether the car is armed.
+      // Note: /status deliberately does NOT feed the watchdog.
+      setInterval(function() {
+        $.getJSON('status', function(d) {
+          document.getElementById('system-status').textContent =
+            'Estado: ' + d.state + ' / ' + d.mode;
+        });
+      }, 500);
+
       // Keyboard controls
       document.addEventListener("keydown", function(event) {
         const speedSlider = document.getElementById('speed-slider-vertical');

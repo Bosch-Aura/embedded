@@ -48,8 +48,13 @@ void web_task(void *pvParameters) {
         server.send(200, "text/html", webpage);
     });
     
+    // Every control handler below calls supervisor_update_heartbeat(): C-4 enables the
+    // watchdog in MANUAL mode too, and browser control must feed it or the vehicle
+    // would fault while being driven from the web page.
+
     // Motor control
     server.on("/forward", []() {
+        supervisor_update_heartbeat();
         if (motor_mb != NULL) {
             mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, MOTOR_SPEED_MAX, 100);
             motor_set_direction(true);
@@ -58,6 +63,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/back", []() {
+        supervisor_update_heartbeat();
         if (motor_mb != NULL) {
             mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, MOTOR_SPEED_MAX, 100);
             motor_set_direction(false);
@@ -66,6 +72,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/driveStop", []() {
+        supervisor_update_heartbeat();
         if (motor_mb != NULL) {
             mailbox_write(motor_mb, TOPIC_MOTOR, CMD_STOP, 0, 100);
         }
@@ -74,6 +81,7 @@ void web_task(void *pvParameters) {
     
     // Steering control with degrees
     server.on("/steer", []() {
+        supervisor_update_heartbeat();
         String angle_str = server.arg("angle");
         if (steer_mb != NULL && angle_str.length() > 0) {
             int angle = angle_str.toInt();
@@ -87,6 +95,7 @@ void web_task(void *pvParameters) {
     
     // Legacy endpoints for backward compatibility
     server.on("/left", []() {
+        supervisor_update_heartbeat();
         if (steer_mb != NULL) {
             mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_LEFT, 100);
         }
@@ -94,6 +103,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/right", []() {
+        supervisor_update_heartbeat();
         if (steer_mb != NULL) {
             mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_RIGHT, 100);
         }
@@ -101,6 +111,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/steerStop", []() {
+        supervisor_update_heartbeat();
         if (steer_mb != NULL) {
             mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_CENTER, 200);
         }
@@ -109,6 +120,7 @@ void web_task(void *pvParameters) {
     
     // Lights control
     server.on("/LightsOn", []() {
+        supervisor_update_heartbeat();
         if (lights_mb != NULL) {
             mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_ON, 0, 1000);
         }
@@ -116,6 +128,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/LightsOff", []() {
+        supervisor_update_heartbeat();
         if (lights_mb != NULL) {
             mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_OFF, 0, 1000);
         }
@@ -123,6 +136,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/LightsAuto", []() {
+        supervisor_update_heartbeat();
         if (lights_mb != NULL) {
             mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_AUTO, 0, 1000);
         }
@@ -131,6 +145,7 @@ void web_task(void *pvParameters) {
     
     // Speed control with direction
     server.on("/changeSpeed", []() {
+        supervisor_update_heartbeat();
         String speed_str = server.arg("speed");
         String direction_str = server.arg("direction");
         
@@ -160,6 +175,7 @@ void web_task(void *pvParameters) {
     
     // System control
     server.on("/mode", []() {
+        supervisor_update_heartbeat();
         String value_str = server.arg("value");
         if (supervisor_mb != NULL && value_str.length() > 0) {
             int32_t mode = (value_str == "AUTO") ? MODE_AUTO : MODE_MANUAL;
@@ -169,6 +185,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/arm", []() {
+        supervisor_update_heartbeat();
         if (supervisor_mb != NULL) {
             mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_ARM, 0, 5000);
         }
@@ -176,6 +193,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/disarm", []() {
+        supervisor_update_heartbeat();
         if (supervisor_mb != NULL) {
             mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_DISARM, 0, 5000);
         }
@@ -183,6 +201,7 @@ void web_task(void *pvParameters) {
     });
     
     server.on("/brake", []() {
+        supervisor_update_heartbeat();
         motor_task_trigger_emergency();
         server.send(200, "text/plain", "BRAKE");
     });

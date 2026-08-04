@@ -57,13 +57,15 @@ void steer_task(void *pvParameters) {
                         // Reset ignored tracking when command can be executed
                         last_ignored_angle = -1;
                         
-                        uint16_t new_angle = (uint16_t)value;
-                        // Clamp angle to valid range
-                        if (new_angle < SERVO_LEFT) {
-                            new_angle = SERVO_LEFT;
-                        } else if (new_angle > SERVO_RIGHT) {
-                            new_angle = SERVO_RIGHT;
+                        // A-8: clamp in the SIGNED type, before narrowing to uint16_t.
+                        // Casting first turned -30 into 65506, which then clamped to
+                        // SERVO_RIGHT: a left command produced full RIGHT lock.
+                        if (value < SERVO_LEFT) {
+                            value = SERVO_LEFT;
+                        } else if (value > SERVO_RIGHT) {
+                            value = SERVO_RIGHT;
                         }
+                        uint16_t new_angle = (uint16_t)value;
                         // Only execute and print if angle actually changed
                         if (new_angle != current_angle) {
                             current_angle = new_angle;

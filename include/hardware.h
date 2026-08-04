@@ -34,8 +34,13 @@ extern "C"
 
 // UART configuration
 #define UART_BAUD_RATE 921600
-#define UART_TX_PIN 9
-#define UART_RX_PIN 10
+// A-11: GPIO 9/10 are wired to the module's internal SPI flash (SD_DATA2/SD_DATA3)
+// on the ESP32-WROOM-32 and are not even exposed on the DevKit v1 header.
+// 16/17 are the standard free choice on this board.
+// NOTE: on ESP32-WROVER modules GPIO 16/17 are taken by the PSRAM - if the board
+// is ever swapped for a WROVER variant, move these to 18/19.
+#define UART_TX_PIN 17
+#define UART_RX_PIN 16
 #define UART_BUF_SIZE 1024
 
 // LDR threshold
@@ -46,8 +51,13 @@ extern "C"
 #define ULTRASONIC_MIN_DISTANCE_CM 2        // Minimum range ~2cm
 #define ULTRASONIC_OBSTACLE_THRESHOLD_CM 30 // Trigger emergency if object closer than 30cm
 
-// Watchdog timeout (ms)
-#define WATCHDOG_TIMEOUT_MS 120
+// Link timing - single source of truth (A-3).
+// The hierarchy that must always hold is:
+//   emission period  <  control command TTL  <  watchdog timeout
+#define LINK_EXPECTED_PERIOD_MS 100                            // 10 Hz, what we recommend to the Brain team
+#define CONTROL_CMD_TTL_MS (LINK_EXPECTED_PERIOD_MS * 2)       // 200 ms
+#define WATCHDOG_TIMEOUT_AUTO_MS (LINK_EXPECTED_PERIOD_MS * 3) // 300 ms, always > TTL
+#define WATCHDOG_TIMEOUT_MANUAL_MS 1000                        // looser: a human operator is in the loop
 
     // Initialize all hardware
     void hardware_init(void);

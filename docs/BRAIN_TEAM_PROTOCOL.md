@@ -5,6 +5,7 @@ Este documento describe cómo enviar comandos desde el sistema Brain (Jetson/PC)
 ## ⚠️ IMPORTANTE: Sistema de Seguridad (ARM/DISARM)
 
 **El sistema inicia DESARMADO por defecto.** Debes armar el sistema antes de que los comandos de control funcionen.
+El firmware cumple esto desde la corrección C-3; versiones anteriores arrancaban ARMADAS pese a lo que decía este documento.
 
 **Secuencia de inicio:**
 1. Armar el sistema: `M:SYS_ARM:0`
@@ -45,10 +46,10 @@ Comandos de gestión del sistema (armado, modo, etc.)
 #### `C:SET_SPEED:<valor>`
 Establece la velocidad del motor de tracción.
 
-- **Valor**: 0-255 (0 = detenido, 255 = máxima velocidad)
+- **Valor**: 0-255 (0 = detenido, 255 = máxima velocidad). Los valores fuera de rango se saturan: un negativo se trata como 0, un valor > 255 como 255.
 - **TTL**: 200ms (el comando expira si no se renueva)
 - **Ejemplo**: `C:SET_SPEED:120`
-- **⚠️ Comportamiento por defecto**: Si no se envía ningún comando o el comando expira, el vehículo avanza automáticamente a velocidad 100 (hacia adelante). Esto permite que el vehículo siga moviéndose sin GPS cuando solo se controla la dirección.
+- **⚠️ Comportamiento al expirar (FAIL-SAFE)**: si el comando expira o se pierde el enlace, **el vehículo frena**. **No hay velocidad por defecto.** Para mantener el vehículo en movimiento hay que reenviar `C:SET_SPEED` de forma periódica (ver §TTL: 10 Hz recomendado).
 
 ```python
 # Ejemplo Python
@@ -58,7 +59,7 @@ ser.write(b"C:SET_SPEED:120\n")
 #### `C:SET_STEER:<valor>`
 Establece el ángulo de dirección del servo.
 
-- **Valor**: 50-135 (50 = izquierda máxima, 105 = centro, 135 = derecha máxima)
+- **Valor**: 50-160 (50 = izquierda máxima, 105 = centro, 160 = derecha máxima). Fuera de rango se satura contra esos extremos.
 - **TTL**: 200ms
 - **Ejemplo**: `C:SET_STEER:105` (centro)
 
@@ -67,38 +68,43 @@ Establece el ángulo de dirección del servo.
 Si tu lane detector envía grados (ej: -45° a +45°), debes convertir así:
 
 ```python
-# Servo range: 50 (izquierda) a 135 (derecha), centro = 105
-# Range total: 85 unidades
-SERVO_LEFT = 50
+# Fuente de verdad: include/hardware.h. El recorrido real es SIMÉTRICO.
+SERVO_LEFT   = 50
 SERVO_CENTER = 105
-SERVO_RIGHT = 135
-SERVO_RANGE = 85  # 135 - 50
+SERVO_RIGHT  = 160
+SERVO_HALF_RANGE = 55   # == SERVO_CENTER - SERVO_LEFT == SERVO_RIGHT - SERVO_CENTER
 
 def degrees_to_servo(degrees, max_degrees=45):
     """
     Convierte grados de lane detector a valor de servo.
-    
+
     Args:
-        degrees: Ángulo en grados (-max_degrees a +max_degrees)
+        degrees: Ángulo en grados (-max_degrees a +max_degrees).
+                 Negativo = izquierda, positivo = derecha.
         max_degrees: Máximo ángulo permitido (default: 45°)
-    
+
     Returns:
-        Valor de servo (50-135)
+        Valor de servo (50-160)
     """
-    # Normalizar a -1.0 a +1.0
-    normalized = degrees / max_degrees
-    # Limitar al rango [-1, 1]
-    normalized = max(-1.0, min(1.0, normalized))
-    # Convertir a valor de servo
-    servo_value = SERVO_CENTER + (normalized * (SERVO_RANGE / 2))
-    return int(round(servo_value))
+    normalized = max(-1.0, min(1.0, degrees / max_degrees))
+    servo = SERVO_CENTER + normalized * SERVO_HALF_RANGE
+    return int(round(max(SERVO_LEFT, min(SERVO_RIGHT, servo))))
 
 # Ejemplos:
-# degrees_to_servo(0)    -> 105 (centro)
+# degrees_to_servo(0)   -> 105 (centro)
 # degrees_to_servo(-45) -> 50  (izquierda máxima)
-# degrees_to_servo(45)  -> 135 (derecha máxima)
-# degrees_to_servo(-20) -> ~82 (izquierda suave)
+# degrees_to_servo(45)  -> 160 (derecha máxima)
+# degrees_to_servo(-20) -> 81  (izquierda suave)
 ```
+
+> **⚠️ CAMBIO RESPECTO DE VERSIONES ANTERIORES DE ESTE DOCUMENTO.**
+> Este documento declaraba `SERVO_RIGHT = 135`. El firmware siempre usó **160**.
+> Si integraste contra 135, tus comandos eran válidos pero solo alcanzaban el 55 %
+> del recorrido disponible hacia la derecha. Con la fórmula corregida **el auto
+> girará más a la derecha que antes con los mismos grados de entrada**:
+> hay que recalibrar el lazo de seguimiento de carril.
+> Además, la función anterior era incorrecta incluso respecto de sus propias
+> constantes (devolvía 63 para -45° y 148 para +45°, no 50 y 135).
 
 **Ejemplo completo con lane detector:**
 
@@ -115,7 +121,11 @@ ser.write(command.encode())
 ### Canal EMERGENCY (`E`)
 
 #### `E:BRAKE_NOW:0`
-Freno de emergencia inmediato. Detiene el motor instantáneamente (<1ms de respuesta).
+Freno de emergencia. Detiene el motor y arranca un periodo de bloqueo de 5 s.
+
+- **Latencia real**: hasta ~50 ms en el peor caso (polling de `LinkRxTask` 10 ms + ciclo de
+  `MotorTask` 10 ms + bloqueo del ultrasonido hasta 30 ms). **No asumir <1 ms.** El E-STOP
+  físico por GPIO sigue siendo el único mecanismo de parada verdaderamente inmediato.
 
 - **Valor**: Siempre 0 (ignorado)
 - **Ejemplo**: `E:BRAKE_NOW:0`
@@ -136,6 +146,8 @@ Alias para freno de emergencia (mismo comportamiento que BRAKE_NOW).
 - **TTL**: 5000ms
 - **Ejemplo**: `M:SYS_ARM:0`
 - **Nota**: Sin ARM, los comandos SET_SPEED y SET_STEER serán ignorados
+- **Respuesta**: `EVENT:CMD_EXECUTED:SYS_ARM` (se emite siempre, incluso si ya estaba armado)
+- **Rechazo**: `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE` si el E-STOP físico sigue accionado
 
 #### `M:SYS_DISARM:0`
 Desarma el sistema (modo seguro). Detiene el vehículo inmediatamente.
@@ -148,9 +160,10 @@ Desarma el sistema (modo seguro). Detiene el vehículo inmediatamente.
 #### `M:SYS_MODE:<valor>`
 Establece el modo del sistema.
 
-- **Valor**: 0 = MANUAL, 1 = AUTO
+- **Valor**: `0` / `MANUAL`, o `1` / `AUTO` (se aceptan las cuatro formas, comparadas como texto)
 - **TTL**: 5000ms
-- **Ejemplo**: `M:SYS_MODE:1` (modo AUTO)
+- **Ejemplo**: `M:SYS_MODE:1` (modo AUTO) o `M:SYS_MODE:AUTO`
+- **Valor desconocido**: se responde `EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE` y **no se cambia el modo**
 - **Nota**: En modo AUTO, el sistema pasa a RUNNING automáticamente cuando recibe heartbeat
 
 ## Ejemplos de Uso
@@ -194,9 +207,9 @@ time.sleep(0.1)
 
 def degrees_to_servo(degrees, max_degrees=45):
     SERVO_CENTER = 105
-    SERVO_RANGE = 85
+    SERVO_HALF_RANGE = 55
     normalized = max(-1.0, min(1.0, degrees / max_degrees))
-    return int(round(SERVO_CENTER + (normalized * (SERVO_RANGE / 2))))
+    return int(round(max(50, min(160, SERVO_CENTER + normalized * SERVO_HALF_RANGE))))
 
 # Loop de control
 while True:
@@ -238,15 +251,74 @@ def control_vehicle(speed, steering_degrees):
 
 ## Consideraciones Importantes
 
-### Time-to-Live (TTL)
+### Time-to-Live (TTL) y watchdog
 Los comandos tienen un tiempo de vida limitado:
-- **CONTROL**: 200ms - Debes enviar comandos periódicamente (mínimo 5 Hz)
-- **MANAGEMENT**: 5000ms - Comandos de sistema duran más
+- **CONTROL**: 200 ms - al expirar, **el vehículo frena** (fail-safe)
+- **MANAGEMENT**: 5000 ms - los comandos de sistema duran más
 
-**Recomendación**: Envía comandos de velocidad y dirección a **10-20 Hz** para mantener el control.
+Además hay un **watchdog de enlace** que lleva el sistema a `FAULT` si deja de llegar
+cualquier comando válido:
+
+| Modo | Timeout del watchdog |
+|---|---|
+| AUTO | 300 ms |
+| MANUAL | 1000 ms |
+
+La jerarquía que el firmware garantiza es `período de emisión < TTL < watchdog`:
+
+```
+período recomendado 100 ms (10 Hz)  <  TTL 200 ms  <  watchdog AUTO 300 ms
+```
+
+**Recomendación**: envía comandos de velocidad y dirección a **10-20 Hz**.
+**Mínimo: 10 Hz.** (Versiones anteriores de este documento decían "mínimo 5 Hz";
+era incorrecto: a 5 Hz el watchdog salta en cada ciclo.)
+
+Solo un comando **reconocido y despachado** refresca el watchdog. Basura que
+casualmente se parsee ya no lo mantiene vivo.
 
 ### Last-Writer-Wins
 El sistema usa patrón "last-writer-wins". Si envías múltiples comandos rápidamente, solo el último es válido. No hay cola de comandos.
+
+### Catálogo de eventos de salida
+
+El ESP32 emite líneas `EVENT:...\n`. Estas son las que forman parte del protocolo
+(cualquier otra línea, típicamente con prefijo `[NombreTarea]`, es depuración humana
+y no debe parsearse):
+
+| Evento | Cuándo |
+|---|---|
+| `EVENT:SYSTEM_READY` | Fin de `setup()`, todas las tareas creadas |
+| `EVENT:STATE_CHANGED:<DISARMED\|ARMED\|RUNNING\|FAULT>` | Cambio de estado |
+| `EVENT:MODE_CHANGED:<AUTO\|MANUAL>` | Cambio de modo |
+| `EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING` | Transición automática |
+| `EVENT:CMD_RECEIVED:<CMD>[:<valor>]` | Comando recibido y enrutado |
+| `EVENT:CMD_EXECUTED:<CMD>[:<valor>]` | Comando aplicado |
+| `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE` | ARM con E-STOP accionado |
+| `EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE` | Valor de modo no reconocido |
+| `EVENT:ESTOP_TRIGGERED:GPIO` | E-STOP físico accionado |
+| `EVENT:ESTOP_RELEASED` | E-STOP físico liberado |
+| `EVENT:WATCHDOG_TIMEOUT` | Pérdida de enlace |
+| `EVENT:FATAL:TASK_CREATE_FAILED:<tarea>` | Fallo de arranque; el equipo reinicia |
+| `EVENT:FATAL:MAILBOX_INIT_FAILED` | Fallo de arranque; el equipo reinicia |
+| `EVENT:FATAL:TX_QUEUE_CREATE_FAILED` | Fallo de arranque; el equipo reinicia |
+
+### Recuperación de FAULT
+
+Se entra en `STATE_FAULT` por **watchdog** (pérdida de enlace) o por **E-STOP físico**.
+FAULT bloquea todos los comandos de control. Para recuperarse:
+
+1. **Eliminar la causa.** Si fue el E-STOP, liberarlo (llega `EVENT:ESTOP_RELEASED`).
+   Si fue el watchdog, restablecer el enlace.
+2. Enviar `M:SYS_ARM:0`.
+   - Si el E-STOP sigue accionado se responde `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE`
+     y el sistema **permanece** en FAULT.
+   - Si la causa cesó, el sistema pasa a `ARMED` y responde `EVENT:CMD_EXECUTED:SYS_ARM`.
+3. Reanudar el envío periódico de comandos de control.
+
+`M:SYS_DISARM:0` seguido de `M:SYS_ARM:0` también funciona y es la secuencia más
+conservadora. Tras un frenado de emergencia hay un **bloqueo de 5 s** durante el cual
+el motor no responde aunque el sistema esté armado.
 
 ### Respuestas del ESP32
 El ESP32 puede enviar mensajes de debug por serial. Puedes leerlos para debugging:
@@ -261,6 +333,9 @@ if ser.in_waiting > 0:
 - Si el comando no se parsea correctamente, el ESP32 imprime: `[LinkRxTask] Failed to parse message: ...`
 - Verifica que el formato sea exacto: `CHANNEL:COMMAND:VALUE\n`
 - Asegúrate de que el baud rate coincida (115200 para USB, 921600 para UART externo)
+- **UART externo: el enlace usa ahora GPIO 17 (TX) y GPIO 16 (RX).** Antes estaba asignado a
+  GPIO 9/10, que en el ESP32-WROOM-32 pertenecen al flash SPI interno y ni siquiera están
+  expuestos en el conector del DevKit v1. Si tenías cableado a 9/10, hay que recablear.
 
 ## Checklist de Integración
 

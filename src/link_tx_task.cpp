@@ -25,14 +25,19 @@ typedef struct {
 
 static QueueHandle_t tx_queue = NULL;
 
-void link_tx_task(void *pvParameters) {
+// A-5: the queue must exist BEFORE any task can produce into it. Creating it
+// inside link_tx_task() was a race: producers found tx_queue == NULL and dropped
+// the initial STATE_CHANGED / MODE_CHANGED events in silence.
+bool link_tx_init(void) {
     tx_queue = xQueueCreate(TX_QUEUE_SIZE, sizeof(telemetry_msg_t));
     if (tx_queue == NULL) {
         Serial.println("[LinkTxTask] Failed to create TX queue");
-        vTaskDelete(NULL);
-        return;
+        return false;
     }
-    
+    return true;
+}
+
+void link_tx_task(void *pvParameters) {
     Serial.println("[LinkTxTask] LinkTx task started");
     
     while (1) {
