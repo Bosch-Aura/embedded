@@ -405,21 +405,22 @@ Si tienes dudas sobre el protocolo o encuentras problemas, consulta:
 ## Configuracion compartida con Brain-Aura
 
 Los valores que los **dos** lados tienen que ver igual viven en un solo archivo,
-`Brain-Aura/hardware.env`:
+`Brain-Aura/hardware.env`. Cada clave declara ahi mismo a que `#define` del
+firmware corresponde:
 
-| Clave | `#define` del firmware |
-|---|---|
-| `BRAIN_SERVO_IZQUIERDA` | `SERVO_LEFT` |
-| `BRAIN_SERVO_CENTRO` | `SERVO_CENTER` |
-| `BRAIN_SERVO_DERECHA` | `SERVO_RIGHT` |
-| `BRAIN_DUTY_MAX` | `MOTOR_SPEED_MAX` |
-| `BRAIN_WATCHDOG_AUTO_MS` | `WATCHDOG_TIMEOUT_AUTO_MS` |
-| `BRAIN_WATCHDOG_MANUAL_MS` | `WATCHDOG_TIMEOUT_MANUAL_MS` |
-| `BRAIN_ULTRASONIC_UMBRAL_CM` | `ULTRASONIC_OBSTACLE_THRESHOLD_CM` |
+```
+# firmware: SERVO_LEFT
+BRAIN_SERVO_IZQUIERDA=50
+```
 
-`scripts/hardware_env.py` lo lee antes de compilar y los inyecta como `-D`; los
+`scripts/hardware_env.py` lo lee antes de compilar y emite `-DSERVO_LEFT=50`. Los
 `#define` de `hardware.h` estan envueltos en `#ifndef`, asi que lo del archivo gana
 y `hardware.h` queda solo como respaldo para compilar sin Brain-Aura al lado.
+
+**El script no tiene ninguna lista de variables.** Para compartir una nueva alcanza
+con marcarla en `hardware.env` y envolver su `#define` en `#ifndef`; no hay que
+tocar el script. Si marcas una que no este envuelta, el script avisa al compilar
+que ese valor no se va a aplicar.
 
 Cambiar cualquiera de esos valores **exige recompilar y reflashear**. La jerarquia
 `periodo < TTL < watchdog` y el orden `SERVO_LEFT < SERVO_CENTER < SERVO_RIGHT` se
