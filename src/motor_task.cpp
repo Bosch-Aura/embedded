@@ -265,9 +265,41 @@ void motor_task(void *pvParameters)
             //     to latch and the vehicle cannot restart on its own.
             // Without the watchdog covering BOTH modes and without FAULT being
             // sticky, this branch would be the C-1 bug all over again.
-            if (applied_dir >= 0)
+            const int8_t want_dir = requested_direction ? 1 : 0;
+
+            if (applied_dir < 0)
             {
+                // Braked: IN3/IN4 are LOW and there is nothing latched to hold.
+                // A direction requested now is applied by the CMD_SET_SPEED
+                // branch when the next speed command arrives.
+            }
+            else if (applied_dir == want_dir)
+            {
+                dir_change_ts = 0;
                 motor_set_speed(current_speed);
+            }
+            else
+            {
+                // C:SET_DIR arrived while a latched speed was being held. The
+                // reversal must happen HERE: with latching there is no fresh
+                // SET_SPEED to carry it, so before this the sender had to
+                // re-transmit the speed itself - which briefly re-applied the
+                // OLD speed and could slam the car to full throttle in the new
+                // direction. Same dead time as the CMD_SET_SPEED path: cut PWM,
+                // wait, then flip, so the H-bridge is never reversed energised.
+                motor_set_speed(0);
+                if (dir_change_ts == 0)
+                {
+                    dir_change_ts = current_time;
+                }
+                else if ((current_time - dir_change_ts) >= MOTOR_DIRECTION_DEADTIME_MS)
+                {
+                    motor_set_direction(want_dir == 1);
+                    applied_dir = want_dir;
+                    lights_set_reverse(want_dir == 0);
+                    dir_change_ts = 0;
+                    motor_set_speed(current_speed);
+                }
             }
         }
 

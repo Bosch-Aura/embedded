@@ -121,6 +121,26 @@ command = f"C:SET_STEER:{servo_value}\n"
 ser.write(command.encode())
 ```
 
+#### `C:SET_DIR:<0|1>`
+Establece el **sentido de marcha**. No cambia la velocidad.
+
+- **Valor**: `1` = adelante, `0` = atras
+- **TTL**: no tiene. Es una bandera persistente, como en la pagina web del propio ESP32.
+- **Ejemplo**: `C:SET_DIR:0` (marcha atras)
+- **Respuesta**: `EVENT:CMD_RECEIVED:SET_DIR:FORWARD` / `:BACKWARD`
+
+**Por que existe:** `C:SET_SPEED` satura los negativos a 0, asi que por el enlace
+serie el vehiculo iba **siempre hacia adelante**. El sentido solo se podia cambiar
+desde la pagina web del ESP32. Un dashboard con marcha atras mandaba velocidades
+negativas y no pasaba nada.
+
+**No hace falta reenviar `SET_SPEED` despues.** La inversion se aplica sola, aunque
+la velocidad este latcheada, respetando el mismo tiempo muerto de 60 ms que evita
+invertir el puente H con corriente (*plugging*). Reenviar la velocidad desde el
+cliente era la solucion anterior y era peligrosa: mandaba primero la velocidad
+**vieja**, asi que pedir "marcha atras suave" viniendo de "adelante a fondo" daba
+un tiron a fondo hacia atras.
+
 ### Canal EMERGENCY (`E`)
 
 #### `E:BRAKE_NOW:0`
@@ -141,6 +161,17 @@ ser.write(b"E:BRAKE_NOW:0\n")
 Alias para freno de emergencia (mismo comportamiento que BRAKE_NOW).
 
 ### Canal MANAGEMENT (`M`)
+
+#### `M:PING:0`
+Latido del enlace. **No toca ningun mailbox y no cambia ningun estado**: su unico
+efecto es alimentar el watchdog.
+
+- **Valor**: siempre 0
+- **Ejemplo**: `M:PING:0`
+
+Es obligatorio con el firmware *latching*: como la velocidad se manda una sola vez
+y despues no hay mas trafico, sin este ping el watchdog engancha `FAULT` al segundo.
+Mandalo a **10 Hz** (ver §TTL).
 
 #### `M:SYS_ARM:0`
 **⚠️ REQUERIDO** - Arma el sistema (prepara para operación). Debe enviarse antes de cualquier comando de control.
@@ -370,4 +401,27 @@ Si tienes dudas sobre el protocolo o encuentras problemas, consulta:
 - `embedded/src/link_rx_task.cpp` - Implementación del parser
 - `embedded/include/messages.h` - Definiciones de canales y comandos
 - `embedded/include/hardware.h` - Valores de servo (SERVO_CENTER, etc.)
+
+## Configuracion compartida con Brain-Aura
+
+Los valores que los **dos** lados tienen que ver igual viven en un solo archivo,
+`Brain-Aura/hardware.env`:
+
+| Clave | `#define` del firmware |
+|---|---|
+| `BRAIN_SERVO_IZQUIERDA` | `SERVO_LEFT` |
+| `BRAIN_SERVO_CENTRO` | `SERVO_CENTER` |
+| `BRAIN_SERVO_DERECHA` | `SERVO_RIGHT` |
+| `BRAIN_DUTY_MAX` | `MOTOR_SPEED_MAX` |
+| `BRAIN_WATCHDOG_AUTO_MS` | `WATCHDOG_TIMEOUT_AUTO_MS` |
+| `BRAIN_WATCHDOG_MANUAL_MS` | `WATCHDOG_TIMEOUT_MANUAL_MS` |
+| `BRAIN_ULTRASONIC_UMBRAL_CM` | `ULTRASONIC_OBSTACLE_THRESHOLD_CM` |
+
+`scripts/hardware_env.py` lo lee antes de compilar y los inyecta como `-D`; los
+`#define` de `hardware.h` estan envueltos en `#ifndef`, asi que lo del archivo gana
+y `hardware.h` queda solo como respaldo para compilar sin Brain-Aura al lado.
+
+Cambiar cualquiera de esos valores **exige recompilar y reflashear**. La jerarquia
+`periodo < TTL < watchdog` y el orden `SERVO_LEFT < SERVO_CENTER < SERVO_RIGHT` se
+comprueban al compilar: si el archivo dice algo incoherente, el firmware no compila.
 
