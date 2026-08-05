@@ -57,6 +57,28 @@ def _candidatos():
     yield os.path.join(aqui, "hardware.env.local")
 
 
+def _fuentes(raiz):
+    """{ruta relativa: contenido} de todos los .h y .cpp del proyecto.
+
+    Se mira el arbol entero, no solo hardware.h: hay #define que dependen del
+    hardware y viven en las tareas (el tiempo muerto del puente H, por ejemplo).
+    """
+    textos = {}
+    for carpeta in ("include", "src"):
+        base = os.path.join(raiz, carpeta)
+        for dirpath, _, ficheros in os.walk(base):
+            for nombre in ficheros:
+                if not nombre.endswith((".h", ".hpp", ".c", ".cpp")):
+                    continue
+                completa = os.path.join(dirpath, nombre)
+                try:
+                    with open(completa, "r") as f:
+                        textos[os.path.relpath(completa, raiz)] = f.read()
+                except (IOError, OSError, UnicodeDecodeError):
+                    pass
+    return textos
+
+
 def _leer(ruta):
     """Devuelve [(define, valor, clave)] de las claves marcadas para el firmware.
 
@@ -113,25 +135,37 @@ if ruta is None:
 else:
     inyectar = _leer(ruta)
 
-    # Un -DNOMBRE solo tiene efecto si el #define de hardware.h esta envuelto en
-    # #ifndef. Si no, el header redefine el macro y GANA, y hardware.env queda
-    # ignorado sin que nada falle: el firmware sale con un valor distinto del
-    # que cree Brain-Aura. Es exactamente el problema que este script existe
-    # para evitar, asi que se avisa fuerte.
-    try:
-        with open(os.path.join(env.subst("$PROJECT_DIR"), "include", "hardware.h")) as f:  # noqa: F821
-            header = f.read()
-    except (IOError, OSError):
-        header = None
+    # Un -DNOMBRE solo tiene efecto si el #define correspondiente esta envuelto
+    # en #ifndef. Si no, el codigo redefine el macro y GANA, y hardware.env
+    # queda ignorado sin que nada falle: el firmware sale con un valor distinto
+    # del que cree Brain-Aura.
+    #
+    # Es exactamente el desajuste que este script existe para evitar, y es
+    # invisible, asi que CORTA la compilacion. Mejor no compilar que flashear un
+    # auto cuyos numeros no coinciden con los del que lo maneja.
+    fuentes = _fuentes(env.subst("$PROJECT_DIR"))  # noqa: F821
+    rotos = []
+    for define, _, clave in inyectar:
+        donde_define = [r for r, t in fuentes.items() if ("#define %s " % define) in t]
+        donde_guarda = [r for r, t in fuentes.items() if ("#ifndef %s" % define) in t]
+        if donde_define and not donde_guarda:
+            rotos.append((define, clave, donde_define[0]))
 
-    if header is not None:
-        for define, _, clave in inyectar:
-            if ("#ifndef %s" % define) not in header:
-                print("[hardware_env] AVISO: %s (%s) NO esta envuelto en "
-                      "'#ifndef %s' en include/hardware.h, asi que el header lo "
-                      "redefine y este valor NO se aplica. Envolvelo o el "
-                      "firmware va a usar otro numero que Brain-Aura."
-                      % (define, clave, define))
+    if rotos:
+        print("")
+        print("[hardware_env] ERROR: hay claves marcadas para el firmware cuyo "
+              "#define no esta envuelto en #ifndef.")
+        print("[hardware_env] El -D no les gana, asi que hardware.env quedaria "
+              "IGNORADO en silencio para estos valores:")
+        for define, clave, donde in rotos:
+            print("[hardware_env]")
+            print("[hardware_env]   %s  (viene de %s)" % (define, clave))
+            print("[hardware_env]   definido sin envolver en %s" % donde)
+            print("[hardware_env]   arreglo:  #ifndef %s" % define)
+            print("[hardware_env]             #define %s <valor>" % define)
+            print("[hardware_env]             #endif")
+        print("")
+        Exit(1)  # noqa: F821
 
     if inyectar:
         env.Append(BUILD_FLAGS=["-D%s=%s" % (d, v) for d, v, _ in inyectar])  # noqa: F821

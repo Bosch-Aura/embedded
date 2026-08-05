@@ -9,10 +9,14 @@
 
 #define MOTOR_TASK_PERIOD_MS 10 // 100 Hz
 #define EMERGENCY_NOTIFICATION_BIT (1 << 0)
+#ifndef STOP_COOLDOWN_MS
 #define STOP_COOLDOWN_MS 5000 // 5 seconds cooldown after stop
+#endif
 // BLOQUEANTE-2: dead time between cutting PWM and flipping IN3/IN4. Reversing
 // an energised H-bridge (plugging) draws roughly twice the stall current.
+#ifndef MOTOR_DIRECTION_DEADTIME_MS
 #define MOTOR_DIRECTION_DEADTIME_MS 60
+#endif
 
 // Direction the link/web asked for. Owned by MotorTask, which is the only task
 // allowed to touch the H-bridge pins; everyone else goes through

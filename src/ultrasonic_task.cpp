@@ -7,7 +7,9 @@
 #include <Arduino.h>
 
 #define ULTRASONIC_TASK_PERIOD_MS 50  // 20 Hz - read sensor every 50ms
-#define ULTRASONIC_DEBOUNCE_COUNT 3   // Require 3 consecutive detections before triggering
+#ifndef ULTRASONIC_DEBOUNCE_COUNT
+#define ULTRASONIC_DEBOUNCE_COUNT 3 // Require 3 consecutive detections before triggering
+#endif
 
 void ultrasonic_task(void *pvParameters) {
     uint8_t obstacle_detected_count = 0;

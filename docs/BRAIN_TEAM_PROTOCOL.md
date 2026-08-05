@@ -418,9 +418,16 @@ BRAIN_SERVO_IZQUIERDA=50
 y `hardware.h` queda solo como respaldo para compilar sin Brain-Aura al lado.
 
 **El script no tiene ninguna lista de variables.** Para compartir una nueva alcanza
-con marcarla en `hardware.env` y envolver su `#define` en `#ifndef`; no hay que
-tocar el script. Si marcas una que no este envuelta, el script avisa al compilar
-que ese valor no se va a aplicar.
+con marcarla en `hardware.env`; no hay que tocar el script. Todos los `#define` de
+`include/hardware.h` estan envueltos en `#ifndef`, asi que cualquiera de ellos se
+puede sobrescribir, incluidos los numeros de pin.
+
+Si marcas una clave cuyo `#define` **no** este envuelto, el `-D` no le gana: el
+codigo redefine el macro y `hardware.env` quedaria ignorado en silencio. El script
+detecta ese caso y **corta la compilacion**, diciendo en que archivo esta el
+`#define` y como envolverlo. Es el mismo criterio que con la jerarquia del
+watchdog: mejor no compilar que flashear un auto cuyos numeros no coinciden con
+los del que lo maneja.
 
 Cambiar cualquiera de esos valores **exige recompilar y reflashear**. La jerarquia
 `periodo < TTL < watchdog` y el orden `SERVO_LEFT < SERVO_CENTER < SERVO_RIGHT` se

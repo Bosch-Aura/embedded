@@ -10,30 +10,57 @@ extern "C"
 {
 #endif
 
-// GPIO Pin definitions
-#define GPIO_MOTOR_IN3 14
-#define GPIO_MOTOR_IN4 12
-#define GPIO_MOTOR_ENB 13
-#define GPIO_SERVO 25
-#define GPIO_HEADLIGHTS 32
-#define GPIO_REVERSE_LIGHTS 33
-#define GPIO_LDR 35
-#define GPIO_ESTOP 4
-#define GPIO_LED_BUILTIN 2
-#define GPIO_ULTRASONIC_TRIG 26 // HC-SR04 Trigger pin
-#define GPIO_ULTRASONIC_ECHO 27 // HC-SR04 Echo pin
+// ---------------------------------------------------------------------------
+// TODOS los valores de este archivo se pueden sobrescribir desde
+// Brain-Aura/hardware.env: scripts/hardware_env.py los inyecta como -D antes de
+// compilar y, gracias a los #ifndef, lo que venga de ahi GANA. Lo de aca abajo
+// es el respaldo, para poder compilar el firmware sin tener Brain-Aura al lado.
+//
+// Los #ifndef NO son decoracion. Un #define sin envolver redefine el macro y le
+// gana al -D, con lo cual hardware.env quedaria ignorado en silencio y el
+// firmware saldria con un numero distinto del que cree Brain-Aura. El script
+// comprueba eso y CORTA la compilacion si pasa, asi que si agregas un #define
+// aca, envolvelo.
+//
+// Para cambiar un valor se edita hardware.env y se recompila; editarlo solo aca
+// hace que los dos lados dejen de coincidir.
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// VALORES COMPARTIDOS CON BRAIN-AURA.
-//
-// Los #ifndef no son decoracion: scripts/hardware_env.py lee
-// Brain-Aura/hardware.env antes de compilar y los inyecta como -D. Lo que
-// venga de ahi GANA sobre lo de este archivo, que queda solo como respaldo
-// para poder compilar el firmware sin tener Brain-Aura al lado.
-//
-// O sea: para cambiar cualquiera de estos valores se edita hardware.env y se
-// recompila. Editarlos SOLO aca hace que los dos lados dejen de coincidir.
-// ---------------------------------------------------------------------------
+// GPIO Pin definitions
+#ifndef GPIO_MOTOR_IN3
+#define GPIO_MOTOR_IN3 14
+#endif
+#ifndef GPIO_MOTOR_IN4
+#define GPIO_MOTOR_IN4 12
+#endif
+#ifndef GPIO_MOTOR_ENB
+#define GPIO_MOTOR_ENB 13
+#endif
+#ifndef GPIO_SERVO
+#define GPIO_SERVO 25
+#endif
+#ifndef GPIO_HEADLIGHTS
+#define GPIO_HEADLIGHTS 32
+#endif
+#ifndef GPIO_REVERSE_LIGHTS
+#define GPIO_REVERSE_LIGHTS 33
+#endif
+#ifndef GPIO_LDR
+#define GPIO_LDR 35
+#endif
+#ifndef GPIO_ESTOP
+#define GPIO_ESTOP 4
+#endif
+#ifndef GPIO_LED_BUILTIN
+#define GPIO_LED_BUILTIN 2
+#endif
+#ifndef GPIO_ULTRASONIC_TRIG
+#define GPIO_ULTRASONIC_TRIG 26 // HC-SR04 Trigger pin
+#endif
+#ifndef GPIO_ULTRASONIC_ECHO
+#define GPIO_ULTRASONIC_ECHO 27 // HC-SR04 Echo pin
+#endif
+
 
 // Servo configuration
 #ifndef SERVO_CENTER
@@ -45,7 +72,9 @@ extern "C"
 #ifndef SERVO_RIGHT
 #define SERVO_RIGHT 160
 #endif
+#ifndef SERVO_PWM_FREQ_HZ
 #define SERVO_PWM_FREQ_HZ 50
+#endif
 
 // Motor configuration
 #ifndef MOTOR_SPEED_MAX
@@ -53,22 +82,36 @@ extern "C"
 #endif
 
 // UART configuration
+#ifndef UART_BAUD_RATE
 #define UART_BAUD_RATE 921600
+#endif
 // A-11: GPIO 9/10 are wired to the module's internal SPI flash (SD_DATA2/SD_DATA3)
 // on the ESP32-WROOM-32 and are not even exposed on the DevKit v1 header.
 // 16/17 are the standard free choice on this board.
 // NOTE: on ESP32-WROVER modules GPIO 16/17 are taken by the PSRAM - if the board
 // is ever swapped for a WROVER variant, move these to 18/19.
+#ifndef UART_TX_PIN
 #define UART_TX_PIN 17
+#endif
+#ifndef UART_RX_PIN
 #define UART_RX_PIN 16
+#endif
+#ifndef UART_BUF_SIZE
 #define UART_BUF_SIZE 1024
+#endif
 
 // LDR threshold
+#ifndef LDR_THRESHOLD
 #define LDR_THRESHOLD 3500
+#endif
 
 // Ultrasonic sensor (HC-SR04) configuration
+#ifndef ULTRASONIC_MAX_DISTANCE_CM
 #define ULTRASONIC_MAX_DISTANCE_CM 400      // Maximum range ~4m
+#endif
+#ifndef ULTRASONIC_MIN_DISTANCE_CM
 #define ULTRASONIC_MIN_DISTANCE_CM 2        // Minimum range ~2cm
+#endif
 #ifndef ULTRASONIC_OBSTACLE_THRESHOLD_CM
 #define ULTRASONIC_OBSTACLE_THRESHOLD_CM 30 // Trigger emergency if object closer than 30cm
 #endif
@@ -76,8 +119,12 @@ extern "C"
 // Link timing - single source of truth (A-3).
 // The hierarchy that must always hold is:
 //   emission period  <  control command TTL  <  watchdog timeout
+#ifndef LINK_EXPECTED_PERIOD_MS
 #define LINK_EXPECTED_PERIOD_MS 100                      // 10 Hz, what we recommend to the Brain team
+#endif
+#ifndef CONTROL_CMD_TTL_MS
 #define CONTROL_CMD_TTL_MS (LINK_EXPECTED_PERIOD_MS * 2) // 200 ms
+#endif
 #ifndef WATCHDOG_TIMEOUT_AUTO_MS
 #define WATCHDOG_TIMEOUT_AUTO_MS (LINK_EXPECTED_PERIOD_MS * 3) // 300 ms, always > TTL
 #endif
