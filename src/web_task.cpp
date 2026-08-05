@@ -53,30 +53,42 @@ void web_task(void *pvParameters) {
     // would fault while being driven from the web page.
 
     // Motor control
+    // MEDIO-1: every TTL below uses CONTROL_CMD_TTL_MS. The hardcoded 100 ms was
+    // exactly the browser keep-alive period, so any jitter expired the command
+    // before the next one arrived and the traction stuttered.
     server.on("/forward", []() {
         supervisor_update_heartbeat();
         if (motor_mb != NULL) {
-            mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, MOTOR_SPEED_MAX, 100);
-            motor_set_direction(true);
+            motor_set_requested_direction(true);
+            mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, MOTOR_SPEED_MAX, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "forward");
     });
-    
+
     server.on("/back", []() {
         supervisor_update_heartbeat();
         if (motor_mb != NULL) {
-            mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, MOTOR_SPEED_MAX, 100);
-            motor_set_direction(false);
+            motor_set_requested_direction(false);
+            mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, MOTOR_SPEED_MAX, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "back");
     });
-    
+
     server.on("/driveStop", []() {
         supervisor_update_heartbeat();
         if (motor_mb != NULL) {
-            mailbox_write(motor_mb, TOPIC_MOTOR, CMD_STOP, 0, 100);
+            mailbox_write(motor_mb, TOPIC_MOTOR, CMD_STOP, 0, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "driveStop");
+    });
+
+    // BLOQUEANTE-1: dedicated keep-alive. The browser must feed the MANUAL-mode
+    // watchdog without rewriting the motor mailbox; the old page re-sent
+    // /changeSpeed?speed=0 at 10 Hz, which landed as a CMD_STOP and kept the
+    // vehicle in a permanent 5 s cooldown.
+    server.on("/heartbeat", []() {
+        supervisor_update_heartbeat();
+        server.send(200, "text/plain", "OK");
     });
     
     // Steering control with degrees
@@ -88,7 +100,7 @@ void web_task(void *pvParameters) {
             // Clamp angle to valid range (50-135)
             if (angle < SERVO_LEFT) angle = SERVO_LEFT;
             if (angle > SERVO_RIGHT) angle = SERVO_RIGHT;
-            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, angle, 200);
+            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, angle, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "OK");
     });
@@ -97,7 +109,7 @@ void web_task(void *pvParameters) {
     server.on("/left", []() {
         supervisor_update_heartbeat();
         if (steer_mb != NULL) {
-            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_LEFT, 100);
+            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_LEFT, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "left");
     });
@@ -105,7 +117,7 @@ void web_task(void *pvParameters) {
     server.on("/right", []() {
         supervisor_update_heartbeat();
         if (steer_mb != NULL) {
-            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_RIGHT, 100);
+            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_RIGHT, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "right");
     });
@@ -113,7 +125,7 @@ void web_task(void *pvParameters) {
     server.on("/steerStop", []() {
         supervisor_update_heartbeat();
         if (steer_mb != NULL) {
-            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_CENTER, 200);
+            mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, SERVO_CENTER, CONTROL_CMD_TTL_MS);
         }
         server.send(200, "text/plain", "steerStop");
     });
@@ -153,18 +165,13 @@ void web_task(void *pvParameters) {
             int speed = speed_str.toInt();
             if (speed >= 0 && speed <= MOTOR_SPEED_MAX) {
                 if (motor_mb != NULL) {
-                    if (speed == 0) {
-                        // Stop
-                        mailbox_write(motor_mb, TOPIC_MOTOR, CMD_STOP, 0, 200);
-                    } else {
-                        // Set speed and direction
-                        mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, speed, 200);
-                        if (direction_str == "backward") {
-                            motor_set_direction(false);
-                        } else {
-                            motor_set_direction(true); // forward or default
-                        }
-                    }
+                    // BLOQUEANTE-1: speed 0 is "no throttle", NOT an emergency
+                    // stop. Sending CMD_STOP here armed the 5 s cooldown, so a
+                    // slider resting at zero kept the vehicle locked out and it
+                    // stayed locked for 5 s after the operator moved it again.
+                    // The real stop is the /brake button.
+                    motor_set_requested_direction(direction_str != "backward");
+                    mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, speed, CONTROL_CMD_TTL_MS);
                 }
                 server.send(200, "text/plain", "OK");
                 return;

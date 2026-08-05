@@ -16,11 +16,33 @@ static mailbox_t *supervisor_mb = NULL;
 static mailbox_t *motor_mb = NULL;
 static mailbox_t *steer_mb = NULL;
 
-static system_mode_t current_mode = MODE_MANUAL;
-// C-3: the system boots DISARMED, as docs/BRAIN_TEAM_PROTOCOL.md promises.
-static system_state_t current_state = STATE_DISARMED;
+// MEDIO-3: these are written by SupervisorTask (core 1) and read by
+// motor_control_allowed() from MotorTask (core 0), and last_heartbeat_ms is
+// written from LinkRxTask and WebTask too. Without volatile the compiler is
+// free to hoist the load out of MotorTask's while(1) - which would freeze the
+// traction authorization at whatever value it had on the first iteration.
+static volatile system_mode_t current_mode = MODE_MANUAL;
+
+// Boot state.
+//
+// C-3 made the system boot DISARMED, matching docs/BRAIN_TEAM_PROTOCOL.md and
+// requiring an explicit M:SYS_ARM:0 before anything can move.
+//
+// -DBOOT_ARMED (set in platformio.ini) skips that handshake: the vehicle comes
+// up ARMED and, in MANUAL mode, immediately auto-transitions to RUNNING. The
+// consequence is that the FIRST C:SET_SPEED to arrive is obeyed - there is no
+// arming step to forget and no dashboard needed. It is still not able to move
+// on its own: with no sustained command MotorTask brakes every cycle (C-1).
+// Note that the watchdog only starts counting after the first heartbeat, so a
+// board that boots ARMED and never receives anything stays in RUNNING.
+#ifdef BOOT_ARMED
+static volatile system_state_t current_state = STATE_ARMED;
+static system_state_t previous_state = STATE_ARMED;
+#else
+static volatile system_state_t current_state = STATE_DISARMED;
 static system_state_t previous_state = STATE_DISARMED;
-static uint32_t last_heartbeat_ms = 0;
+#endif
+static volatile uint32_t last_heartbeat_ms = 0;
 static bool estop_triggered = false;
 
 void supervisor_task(void *pvParameters) {
@@ -29,6 +51,10 @@ void supervisor_task(void *pvParameters) {
     motor_mb = params->motor_mailbox;
     steer_mb = params->steer_mailbox;
     
+    // Timestamp of the last management command actually acted upon, so a stale
+    // entry sitting in the mailbox until its TTL expires is not re-executed.
+    uint32_t last_processed_cmd_ts = 0;
+
     Serial.println("[SupervisorTask] Supervisor task started");
 
     // A-5: the 100 ms "give link_tx_task time to initialize" delay is gone.
@@ -61,7 +87,15 @@ void supervisor_task(void *pvParameters) {
         bool expired;
         
         if (mailbox_read(supervisor_mb, &topic, &cmd, &value, &ts_ms, &expired)) {
-            if (!expired) {
+            // Management commands are EDGE triggered, not level triggered.
+            // mailbox_read() does not consume the entry, so a SYS_ARM (TTL 5 s)
+            // was re-executed on every 20 ms cycle for five seconds. That did
+            // not just spam EVENT:CMD_EXECUTED:SYS_ARM - it silently re-armed
+            // the vehicle right after a watchdog FAULT, defeating the very
+            // protection that had just stopped it. Only act on a timestamp we
+            // have not processed yet.
+            if (!expired && ts_ms != last_processed_cmd_ts) {
+                last_processed_cmd_ts = ts_ms;
                 switch (cmd) {
                     case CMD_SYS_ARM:
                         // C-3 / M-4: FAULT is a valid starting point for arming;
@@ -205,6 +239,20 @@ void supervisor_task(void *pvParameters) {
 
 void supervisor_update_heartbeat(void) {
     last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+// ALTO-1: latch the system into FAULT from another task.
+// FAULT never clears by itself, so whoever calls this guarantees the vehicle
+// stays stopped until an operator re-arms. Used by the ultrasonic emergency:
+// braking alone was not enough, because once the 5 s cooldown expired the state
+// was still RUNNING and a fresh SET_SPEED made the vehicle drive off again.
+void supervisor_trigger_fault(const char *reason) {
+    if (current_state != STATE_FAULT) {
+        current_state = STATE_FAULT;
+        Serial.print("EVENT:FAULT_TRIGGERED:");
+        Serial.println(reason != NULL ? reason : "UNKNOWN");
+        Serial.flush();
+    }
 }
 
 system_mode_t supervisor_get_mode(void) {

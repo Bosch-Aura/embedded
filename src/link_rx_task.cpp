@@ -76,6 +76,7 @@ static bool parse_uart_message(const char *msg, char *channel, char *cmd,
 typedef struct {
     char buf[UART_BUF_SIZE];
     int  len;
+    bool overflowed; // MEDIO-6: discarding the rest of an over-long line
 } line_accum_t;
 
 // Returns true and leaves a complete line (terminator stripped) in acc->buf
@@ -83,6 +84,12 @@ static bool read_line_accum(Stream &stream, line_accum_t *acc) {
     while (stream.available() > 0) {
         char c = (char)stream.read();
         if (c == '\n' || c == '\r') {
+            if (acc->overflowed) {
+                // MEDIO-6: end of the over-long line. Drop it whole and resync.
+                acc->overflowed = false;
+                acc->len = 0;
+                continue;
+            }
             if (acc->len == 0) {
                 continue; // ignore stray terminators / empty lines
             }
@@ -90,11 +97,19 @@ static bool read_line_accum(Stream &stream, line_accum_t *acc) {
             acc->len = 0;
             return true; // complete line
         }
+        if (acc->overflowed) {
+            continue; // still swallowing the over-long line
+        }
         if (acc->len < (int)sizeof(acc->buf) - 1) {
             acc->buf[acc->len++] = c;
         } else {
-            acc->len = 0; // line too long: discard it
-            Serial.println("[LinkRxTask] Line overflow, discarded");
+            // MEDIO-6: log ONCE and discard until the next terminator. The old
+            // code printed per byte (a blocking Serial write inside a priority-4
+            // task) and reset len, so the tail of the long line was re-parsed as
+            // if it were a fresh command.
+            acc->overflowed = true;
+            acc->len = 0;
+            Serial.println("[LinkRxTask] Line overflow, discarding until end of line");
         }
     }
     return false; // still incomplete, keep the bytes for the next poll
@@ -112,7 +127,9 @@ void link_rx_task(void *pvParameters) {
     static line_accum_t acc_usb;
     static line_accum_t acc_uart1;
     acc_usb.len = 0;
+    acc_usb.overflowed = false;
     acc_uart1.len = 0;
+    acc_uart1.overflowed = false;
 
     const char *data = NULL;
 
@@ -173,7 +190,14 @@ void link_rx_task(void *pvParameters) {
                     }
                         
                     case CHANNEL_MANAGEMENT:
-                        if (strcmp(cmd, "SYS_ARM") == 0) {
+                        // M:PING:0 - liveness only. With latching speed the
+                        // controller stops re-sending SET_SPEED, so this is what
+                        // proves the link is still up. It touches no mailbox and
+                        // changes no state: its only effect is feeding the
+                        // watchdog via command_dispatched below.
+                        if (strcmp(cmd, "PING") == 0) {
+                            command_dispatched = true;
+                        } else if (strcmp(cmd, "SYS_ARM") == 0) {
                             if (supervisor_mb != NULL) {
                                 Serial.println("EVENT:CMD_RECEIVED:SYS_ARM");
                                 Serial.flush();

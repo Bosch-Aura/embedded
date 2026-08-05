@@ -49,6 +49,9 @@ Establece la velocidad del motor de tracción.
 - **Valor**: 0-255 (0 = detenido, 255 = máxima velocidad). Los valores fuera de rango se saturan: un negativo se trata como 0, un valor > 255 como 255.
 - **TTL**: 200ms (el comando expira si no se renueva)
 - **Ejemplo**: `C:SET_SPEED:120`
+- **⚠️ UMBRAL DE ARRANQUE: 140** (medido en banco el 2026-08-04, con el vehículo cargado). Por debajo de ese valor el motor **no arranca desde parado**: el firmware acepta el comando y emite `EVENT:CMD_EXECUTED:SET_SPEED`, pero las ruedas no se mueven. Es una limitación física (fricción estática), no un fallo del firmware — y resulta engañosa, porque desde el lado del cliente todo parece haber funcionado.
+
+  **Implicación para quien genere las consignas:** una conversión lineal desde otra escala de velocidad va a producir valores por debajo de 140 que el vehículo ignora en silencio. Hay que mapear el rango útil por encima del umbral, o dar un pulso de arranque y después bajar. La velocidad mínima para *mantener* el movimiento es menor que la de arranque; conviene medirla antes de calibrar el lazo de control.
 - **⚠️ Comportamiento al expirar (FAIL-SAFE)**: si el comando expira o se pierde el enlace, **el vehículo frena**. **No hay velocidad por defecto.** Para mantener el vehículo en movimiento hay que reenviar `C:SET_SPEED` de forma periódica (ver §TTL: 10 Hz recomendado).
 
 ```python

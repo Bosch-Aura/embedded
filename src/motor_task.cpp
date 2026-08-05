@@ -10,9 +10,22 @@
 #define MOTOR_TASK_PERIOD_MS 10 // 100 Hz
 #define EMERGENCY_NOTIFICATION_BIT (1 << 0)
 #define STOP_COOLDOWN_MS 5000 // 5 seconds cooldown after stop
+// BLOQUEANTE-2: dead time between cutting PWM and flipping IN3/IN4. Reversing
+// an energised H-bridge (plugging) draws roughly twice the stall current.
+#define MOTOR_DIRECTION_DEADTIME_MS 60
+
+// Direction the link/web asked for. Owned by MotorTask, which is the only task
+// allowed to touch the H-bridge pins; everyone else goes through
+// motor_set_requested_direction().
+static volatile bool requested_direction = true; // true = forward
 
 static mailbox_t *motor_mailbox = NULL;
 static TaskHandle_t motor_task_handle = NULL;
+
+void motor_set_requested_direction(bool forward)
+{
+    requested_direction = forward;
+}
 
 // C-1: single authorization helper, used both for fresh commands and for the
 // no-command fallback. Traction is only allowed in states where the vehicle is
@@ -37,7 +50,11 @@ void motor_task(void *pvParameters)
     motor_task_handle = xTaskGetCurrentTaskHandle();
 
     uint8_t current_speed = 0;
-    bool motor_direction = true; // forward
+    // -1 = unknown/braked (IN3=IN4=LOW), 0 = backward, 1 = forward.
+    // "Unknown" matters: after motor_stop() both pins are LOW, so the direction
+    // must be re-applied before the motor can turn again.
+    int8_t applied_dir = -1;
+    uint32_t dir_change_ts = 0;
     bool has_valid_command = false;
     uint32_t last_stop_timestamp = 0;
     bool in_cooldown = false;
@@ -61,6 +78,8 @@ void motor_task(void *pvParameters)
             lights_set_reverse(false);
             current_speed = 0;
             last_reported_speed = 0;
+            applied_dir = -1; // motor_stop() cleared IN3/IN4
+            dir_change_ts = 0;
             has_valid_command = false;
             last_stop_timestamp = current_time;
             in_cooldown = true;
@@ -140,18 +159,53 @@ void motor_task(void *pvParameters)
                         uint8_t new_speed = (uint8_t)value;
 
                         current_speed = new_speed;
-                        // Ensure forward direction when setting speed
-                        motor_set_direction(true);
-                        motor_set_speed(current_speed);
-                        motor_direction = true;
-                        lights_set_reverse(false);
-                        // Only print if the applied speed actually changed
-                        if ((int32_t)current_speed != last_reported_speed)
+
+                        // BLOQUEANTE-2: honour the requested direction instead
+                        // of forcing forward on every 10 ms cycle. Flipping
+                        // IN3/IN4 with PWM applied is plugging: the web UI
+                        // resending "backward" at 10 Hz was inverting the
+                        // H-bridge ten times a second under load.
+                        const int8_t want_dir = requested_direction ? 1 : 0;
+
+                        if (applied_dir == want_dir)
                         {
-                            last_reported_speed = current_speed;
-                            Serial.print("EVENT:CMD_EXECUTED:SET_SPEED:");
-                            Serial.println(current_speed);
-                            Serial.flush();
+                            dir_change_ts = 0;
+                            motor_set_speed(current_speed);
+                            // Only print if the applied speed actually changed
+                            if ((int32_t)current_speed != last_reported_speed)
+                            {
+                                last_reported_speed = current_speed;
+                                Serial.print("EVENT:CMD_EXECUTED:SET_SPEED:");
+                                Serial.println(current_speed);
+                                Serial.flush();
+                            }
+                        }
+                        else if (applied_dir < 0)
+                        {
+                            // Coming from a braked state: IN3/IN4 are already
+                            // LOW and PWM is 0, so switching is safe right now.
+                            motor_set_direction(want_dir == 1);
+                            applied_dir = want_dir;
+                            lights_set_reverse(want_dir == 0);
+                            dir_change_ts = 0;
+                        }
+                        else
+                        {
+                            // Reversal while energised: cut PWM, wait out the
+                            // dead time, and only then switch. Non-blocking so
+                            // the emergency notification keeps being polled.
+                            motor_set_speed(0);
+                            if (dir_change_ts == 0)
+                            {
+                                dir_change_ts = current_time;
+                            }
+                            else if ((current_time - dir_change_ts) >= MOTOR_DIRECTION_DEADTIME_MS)
+                            {
+                                motor_set_direction(want_dir == 1);
+                                applied_dir = want_dir;
+                                lights_set_reverse(want_dir == 0);
+                                dir_change_ts = 0;
+                            }
                         }
                     }
                     break;
@@ -165,7 +219,8 @@ void motor_task(void *pvParameters)
                     lights_set_reverse(false);
                     current_speed = 0;
                     last_reported_speed = 0;
-                    motor_direction = true;
+                    applied_dir = -1; // motor_stop() cleared IN3/IN4
+                    dir_change_ts = 0;
                     last_stop_timestamp = current_time;
                     in_cooldown = true;
                     Serial.println("[MotorTask] Motor stopped (brake/stop command), 5 second cooldown started");
@@ -188,7 +243,8 @@ void motor_task(void *pvParameters)
             motor_stop();
             current_speed = 0;
             last_reported_speed = 0;
-            motor_direction = true;
+            applied_dir = -1;
+            dir_change_ts = 0;
             lights_set_reverse(false);
         }
         else if (has_valid_command)
@@ -197,14 +253,22 @@ void motor_task(void *pvParameters)
         }
         else
         {
-            // No fresh command in the mailbox (expired, or link lost): brake.
-            // NEVER hold the last valid speed - that is what made the vehicle
-            // restart by itself 5 s after an emergency stop.
-            motor_stop();
-            current_speed = 0;
-            last_reported_speed = 0;
-            motor_direction = true;
-            lights_set_reverse(false);
+            // LATCHING: hold the last commanded speed instead of braking, so a
+            // single C:SET_SPEED keeps the vehicle moving until told otherwise.
+            //
+            // This is only safe because of the branch above and the watchdog:
+            //   - Losing the link stops the M:PING:0 stream, the watchdog
+            //     latches FAULT, motor_control_allowed() goes false, and the
+            //     branch above brakes and clears current_speed.
+            //   - DISARM, E-STOP, ultrasonic and cooldown all land in that same
+            //     branch, which zeroes current_speed - so there is nothing left
+            //     to latch and the vehicle cannot restart on its own.
+            // Without the watchdog covering BOTH modes and without FAULT being
+            // sticky, this branch would be the C-1 bug all over again.
+            if (applied_dir >= 0)
+            {
+                motor_set_speed(current_speed);
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(MOTOR_TASK_PERIOD_MS));

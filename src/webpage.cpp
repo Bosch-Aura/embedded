@@ -6,7 +6,13 @@ const char *webpage = R"html(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.css" rel="stylesheet" />
-    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+    <!-- BLOQUEANTE-3: the jQuery CDN <script> that used to live here is gone.
+         The ESP32 runs as an isolated AP, so a connected phone has no route to
+         the internet: jQuery never loaded, $ was undefined, and EVERY button
+         threw - including ARM, DISARM and the emergency brake. All calls now
+         use the browser's built-in fetch(), which needs no network beyond the
+         car itself. Bootstrap above is cosmetic only; if it fails to load the
+         page looks plain but every control still works. -->
     <style>
       #range-slider { width: 90%; height: 20px; }
       #speed-slider-vertical {
@@ -154,7 +160,11 @@ const char *webpage = R"html(
     </div>
 
     <script>
-      function makeAjaxCall(url) { $.ajax({ url: url }); }
+      // BLOQUEANTE-3: no jQuery. fetch() is built into every browser that can
+      // render this page, so the controls keep working on an offline AP.
+      function makeAjaxCall(url) {
+        return fetch(url, { cache: 'no-store' }).catch(function () { /* link lost: the car brakes on its own */ });
+      }
       
       // Steering wheel control
       const SERVO_CENTER = 105;
@@ -264,12 +274,15 @@ const char *webpage = R"html(
         if (speed === 0) {
           speedDisplay.textContent = 'Detenido: 0';
           lastSpeedCall = 'changeSpeed?speed=0';
+          throttleActive = false;
         } else if (speed > 0) {
           speedDisplay.textContent = 'Adelante: ' + speed;
           lastSpeedCall = 'changeSpeed?speed=' + speed + '&direction=forward';
+          throttleActive = true;
         } else {
           speedDisplay.textContent = 'Atrás: ' + Math.abs(speed);
           lastSpeedCall = 'changeSpeed?speed=' + Math.abs(speed) + '&direction=backward';
+          throttleActive = true;
         }
         makeAjaxCall(lastSpeedCall);
       }
@@ -278,6 +291,7 @@ const char *webpage = R"html(
         const speedSlider = document.getElementById('speed-slider-vertical');
         if (speedSlider) { speedSlider.value = 0; }
         lastSpeedCall = 'changeSpeed?speed=0';
+        throttleActive = false;
         document.getElementById('speed-display').textContent = 'Detenido: 0';
         makeAjaxCall('brake');
       }
@@ -287,15 +301,33 @@ const char *webpage = R"html(
       // (C-4). Re-sending the current speed at 10 Hz is what keeps web control alive; if
       // the browser is closed or the Wi-Fi drops, the car stops on its own. That is the
       // intended fail-safe, not a bug.
-      setInterval(function() { makeAjaxCall(lastSpeedCall); }, 100);
+      // BLOQUEANTE-1: when the throttle is at zero we ping /heartbeat instead of
+      // re-sending the speed. The old page re-sent changeSpeed?speed=0 at 10 Hz,
+      // which the firmware turned into a CMD_STOP - re-arming the 5 s cooldown
+      // on every single tick, so the vehicle was locked out while the slider sat
+      // at zero and stayed locked 5 s after the operator moved it.
+      let throttleActive = false;
+
+      setInterval(function() {
+        if (throttleActive) {
+          makeAjaxCall(lastSpeedCall);
+        } else {
+          makeAjaxCall('heartbeat');
+        }
+      }, 100);
 
       // Poll the system state so the operator can see whether the car is armed.
       // Note: /status deliberately does NOT feed the watchdog.
       setInterval(function() {
-        $.getJSON('status', function(d) {
-          document.getElementById('system-status').textContent =
-            'Estado: ' + d.state + ' / ' + d.mode;
-        });
+        fetch('status', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            document.getElementById('system-status').textContent =
+              'Estado: ' + d.state + ' / ' + d.mode;
+          })
+          .catch(function () {
+            document.getElementById('system-status').textContent = 'Estado: SIN CONEXIÓN';
+          });
       }, 500);
 
       // Keyboard controls
