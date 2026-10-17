@@ -69,6 +69,7 @@ typedef struct {
 
 * **Safety Barrier (Ultrasonic):** La tarea de ultrasonido opera con la máxima prioridad del sistema, teniendo la capacidad de anular comandos de motor para prevenir colisiones físicas.
 * **Time-to-Live (TTL):** Antes de ejecutar cualquier acción, el consumidor valida: `(now - ts_ms) < ttl_ms`. Si falla, el sistema asume pérdida de enlace y frena.
+  > **Nota (firmware v2 vigente):** el firmware actual **no** frena al vencer el TTL: el control es *latching* (sostiene la última velocidad y el último ángulo) y la pérdida de enlace la detecta el watchdog del supervisor (300 ms AUTO / 1000 ms MANUAL), que lleva a `FAULT` y frena. El equipo Brain ya integró contra esa semántica (`docs/BRAIN_TEAM_PROTOCOL.md`); si v3 vuelve a "TTL vencido = frenar", es un cambio de protocolo y hay que coordinarlo.
 * **Emergency Fast-Path:** Los comandos de emergencia utilizan un bit específico en la notificación (`xTaskNotify`), permitiendo una reacción inmediata sin procesar la estructura completa.
 
 ---

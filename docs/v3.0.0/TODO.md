@@ -5,7 +5,7 @@
 ### Problema Actual
 - Las tareas de control (MotorTask, SteerTask, LightsTask) hacen **polling** del mailbox cada 10ms
 - Cuando se escribe un comando en el mailbox, la tarea puede tardar hasta 10ms en enterarse
-- Solo los comandos de emergencia usan notificaciones directas (`xTaskNotify`) para respuesta <1ms
+- Solo los comandos de emergencia usan notificaciones directas (`xTaskNotify`). Ojo: hoy la respuesta **no** es <1 ms sino de hasta ~50 ms, porque `MotorTask` lee la notificación con timeout 0 y sigue bloqueando en `vTaskDelay()` (ver A-1 en `docs/PLAN_MEJORAS.md`)
 - Los comandos normales (SET_SPEED, SET_STEER, etc.) tienen delay innecesario
 
 ### Solución Propuesta
