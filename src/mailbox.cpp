@@ -1,5 +1,6 @@
 #include "mailbox.h"
 #include "freertos/FreeRTOS.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
 bool mailbox_init(mailbox_t *mb) {
@@ -14,7 +15,7 @@ bool mailbox_init(mailbox_t *mb) {
     if (mb->mutex == NULL) {
         // A-12: without the mutex every read/write silently returns false, i.e. a
         // permanently dead command channel. The caller must not ignore this.
-        Serial.println("[Mailbox] Failed to create mailbox mutex");
+        serial_line("[Mailbox] Failed to create mailbox mutex");
         return false;
     }
     return true;

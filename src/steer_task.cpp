@@ -5,6 +5,7 @@
 #include "supervisor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
 #define STEER_TASK_PERIOD_MS 10  // 100 Hz
@@ -17,7 +18,7 @@ void steer_task(void *pvParameters) {
     uint16_t current_angle = SERVO_CENTER;
     int32_t last_ignored_angle = -1; // Track last ignored angle command to avoid repeated logs
     
-    Serial.println("[SteerTask] Steer task started");
+    serial_line("[SteerTask] Steer task started");
     
     while (1) {
         // Read mailbox for steering commands
@@ -47,7 +48,7 @@ void steer_task(void *pvParameters) {
                         if (!can_control) {
                             // Only print if this is a different command than the last ignored one
                             if (last_ignored_angle != value) {
-                                Serial.println("[SteerTask] SET_STEER ignored - system DISARMED");
+                                serial_line("[SteerTask] SET_STEER ignored - system DISARMED");
                                 Serial.flush();
                                 last_ignored_angle = value;
                             }
@@ -70,8 +71,7 @@ void steer_task(void *pvParameters) {
                         if (new_angle != current_angle) {
                             current_angle = new_angle;
                             steer_set_angle(current_angle);
-                            Serial.print("EVENT:CMD_EXECUTED:SET_STEER:");
-                            Serial.println(current_angle);
+                            serial_linef("EVENT:CMD_EXECUTED:SET_STEER:%u", (unsigned)current_angle);
                             Serial.flush();
                         }
                         break;
@@ -82,9 +82,9 @@ void steer_task(void *pvParameters) {
                         if (current_angle != SERVO_CENTER) {
                             current_angle = SERVO_CENTER;
                             steer_set_angle(current_angle);
-                            Serial.println("EVENT:CMD_EXECUTED:SET_STEER_CENTER");
+                            serial_line("EVENT:CMD_EXECUTED:SET_STEER_CENTER");
                             Serial.flush();
-                            Serial.println("[SteerTask] Steering centered (stop command)");
+                            serial_line("[SteerTask] Steering centered (stop command)");
                         }
                         break;
                         

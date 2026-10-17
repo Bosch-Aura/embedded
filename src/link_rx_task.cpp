@@ -6,6 +6,7 @@
 #include "supervisor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "serial_out.h"
 #include <Arduino.h>
 #include <string.h>
 #include <stdlib.h>
@@ -109,7 +110,7 @@ static bool read_line_accum(Stream &stream, line_accum_t *acc) {
             // if it were a fresh command.
             acc->overflowed = true;
             acc->len = 0;
-            Serial.println("[LinkRxTask] Line overflow, discarding until end of line");
+            serial_line("[LinkRxTask] Line overflow, discarding until end of line");
         }
     }
     return false; // still incomplete, keep the bytes for the next poll
@@ -133,7 +134,7 @@ void link_rx_task(void *pvParameters) {
 
     const char *data = NULL;
 
-    Serial.println("[LinkRxTask] LinkRx task started");
+    serial_line("[LinkRxTask] LinkRx task started");
 
     while (1) {
         // Read UART data from USB Serial first (testing over single USB cable), then from Serial1
@@ -159,27 +160,25 @@ void link_rx_task(void *pvParameters) {
                     case CHANNEL_EMERGENCY:
                         if (strcmp(cmd, "BRAKE_NOW") == 0 || strcmp(cmd, "STOP") == 0) {
                             // Emergency: send notification to MotorTask
-                            Serial.println("EVENT:CMD_RECEIVED:BRAKE_NOW");
+                            serial_line("EVENT:CMD_RECEIVED:BRAKE_NOW");
                             Serial.flush();
                             motor_task_trigger_emergency();
                             command_dispatched = true;
-                            Serial.println("[LinkRxTask] Emergency brake triggered via UART");
+                            serial_line("[LinkRxTask] Emergency brake triggered via UART");
                         }
                         break;
                         
                     case CHANNEL_CONTROL: {
                         // Always send commands to mailboxes - tasks will validate state before execution
                         if (strcmp(cmd, "SET_SPEED") == 0) {
-                            Serial.print("EVENT:CMD_RECEIVED:SET_SPEED:");
-                            Serial.println(value);
+                            serial_linef("EVENT:CMD_RECEIVED:SET_SPEED:%ld", (long)value);
                             Serial.flush();
                             if (motor_mb != NULL) {
                                 mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, value, CONTROL_CMD_TTL_MS);
                                 command_dispatched = true;
                             }
                         } else if (strcmp(cmd, "SET_STEER") == 0) {
-                            Serial.print("EVENT:CMD_RECEIVED:SET_STEER:");
-                            Serial.println(value);
+                            serial_linef("EVENT:CMD_RECEIVED:SET_STEER:%ld", (long)value);
                             Serial.flush();
                             if (steer_mb != NULL) {
                                 mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, value, CONTROL_CMD_TTL_MS);
@@ -198,8 +197,7 @@ void link_rx_task(void *pvParameters) {
                             // CMD_SET_SPEED, que es la que tiene el tiempo muerto que
                             // evita invertir el puente H con corriente, asi que el
                             // emisor debe reenviar SET_SPEED despues de este comando.
-                            Serial.print("EVENT:CMD_RECEIVED:SET_DIR:");
-                            Serial.println(value != 0 ? "FORWARD" : "BACKWARD");
+                            serial_linef("EVENT:CMD_RECEIVED:SET_DIR:%s", value != 0 ? "FORWARD" : "BACKWARD");
                             Serial.flush();
                             motor_set_requested_direction(value != 0);
                             command_dispatched = true;
@@ -217,19 +215,19 @@ void link_rx_task(void *pvParameters) {
                             command_dispatched = true;
                         } else if (strcmp(cmd, "SYS_ARM") == 0) {
                             if (supervisor_mb != NULL) {
-                                Serial.println("EVENT:CMD_RECEIVED:SYS_ARM");
+                                serial_line("EVENT:CMD_RECEIVED:SYS_ARM");
                                 Serial.flush();
                                 mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_ARM, 0, 5000);
                                 command_dispatched = true;
-                                Serial.println("[LinkRxTask] SYS_ARM command");
+                                serial_line("[LinkRxTask] SYS_ARM command");
                             }
                         } else if (strcmp(cmd, "SYS_DISARM") == 0) {
                             if (supervisor_mb != NULL) {
-                                Serial.println("EVENT:CMD_RECEIVED:SYS_DISARM");
+                                serial_line("EVENT:CMD_RECEIVED:SYS_DISARM");
                                 Serial.flush();
                                 mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_DISARM, 0, 5000);
                                 command_dispatched = true;
-                                Serial.println("[LinkRxTask] SYS_DISARM command");
+                                serial_line("[LinkRxTask] SYS_DISARM command");
                             }
                         } else if (strcmp(cmd, "SYS_MODE") == 0) {
                             if (supervisor_mb != NULL) {
@@ -244,53 +242,49 @@ void link_rx_task(void *pvParameters) {
                                     mode = MODE_MANUAL;
                                 } else {
                                     // Never assume a mode for an unknown value
-                                    Serial.println("EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE");
+                                    serial_line("EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE");
                                     Serial.flush();
                                     break;
                                 }
-                                Serial.print("EVENT:CMD_RECEIVED:SYS_MODE:");
-                                Serial.println(mode == MODE_AUTO ? "AUTO" : "MANUAL");
+                                serial_linef("EVENT:CMD_RECEIVED:SYS_MODE:%s", mode == MODE_AUTO ? "AUTO" : "MANUAL");
                                 Serial.flush();
                                 mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_MODE, mode, 5000);
                                 command_dispatched = true;
-                                Serial.print("[LinkRxTask] SYS_MODE: ");
-                                Serial.println(mode == MODE_AUTO ? "AUTO" : "MANUAL");
+                                serial_linef("[LinkRxTask] SYS_MODE: %s", mode == MODE_AUTO ? "AUTO" : "MANUAL");
                             }
                         } else if (strcmp(cmd, "LIGHTS_ON") == 0) {
                             if (lights_mb != NULL) {
-                                Serial.println("EVENT:CMD_RECEIVED:LIGHTS_ON");
+                                serial_line("EVENT:CMD_RECEIVED:LIGHTS_ON");
                                 Serial.flush();
                                 mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_ON, 0, 1000);
                                 command_dispatched = true;
-                                Serial.println("[LinkRxTask] LIGHTS_ON command");
+                                serial_line("[LinkRxTask] LIGHTS_ON command");
                             }
                         } else if (strcmp(cmd, "LIGHTS_OFF") == 0) {
                             if (lights_mb != NULL) {
-                                Serial.println("EVENT:CMD_RECEIVED:LIGHTS_OFF");
+                                serial_line("EVENT:CMD_RECEIVED:LIGHTS_OFF");
                                 Serial.flush();
                                 mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_OFF, 0, 1000);
                                 command_dispatched = true;
-                                Serial.println("[LinkRxTask] LIGHTS_OFF command");
+                                serial_line("[LinkRxTask] LIGHTS_OFF command");
                             }
                         } else if (strcmp(cmd, "LIGHTS_AUTO") == 0) {
                             if (lights_mb != NULL) {
-                                Serial.println("EVENT:CMD_RECEIVED:LIGHTS_AUTO");
+                                serial_line("EVENT:CMD_RECEIVED:LIGHTS_AUTO");
                                 Serial.flush();
                                 mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_AUTO, 0, 1000);
                                 command_dispatched = true;
-                                Serial.println("[LinkRxTask] LIGHTS_AUTO command");
+                                serial_line("[LinkRxTask] LIGHTS_AUTO command");
                             }
                         }
                         break;
                         
                     default:
-                        Serial.print("[LinkRxTask] Unknown channel: ");
-                        Serial.println(channel);
+                        serial_linef("[LinkRxTask] Unknown channel: %c", channel);
                         break;
                 }
             } else {
-                Serial.print("[LinkRxTask] Failed to parse message: ");
-                Serial.println(data);
+                serial_linef("[LinkRxTask] Failed to parse message: %s", data);
             }
 
             // A-6: feed the watchdog only for commands we actually understood and

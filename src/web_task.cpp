@@ -9,6 +9,7 @@
 #include <WebServer.h>
 #include <string.h>
 #include "webpage.h"
+#include "serial_out.h"
 
 #define WIFI_AP_SSID "RC-Car-ESP32"
 #define WIFI_AP_PASSWORD ""  // Open AP
@@ -23,14 +24,12 @@ void init_wifi_ap(void) {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
     
-    Serial.print("[WebTask] Wi-Fi AP started. SSID: ");
-    Serial.print(WIFI_AP_SSID);
-    Serial.print(", IP: ");
-    Serial.println(WiFi.softAPIP());
+    serial_linef("[WebTask] Wi-Fi AP started. SSID: %s, IP: %s", WIFI_AP_SSID,
+                 WiFi.softAPIP().toString().c_str());
     
     // Turn on built-in LED when WiFi AP is ready
     digitalWrite(GPIO_LED_BUILTIN, HIGH);
-    Serial.println("[WebTask] Built-in LED turned ON (WiFi AP ready)");
+    serial_line("[WebTask] Built-in LED turned ON (WiFi AP ready)");
 }
 
 void web_task(void *pvParameters) {
@@ -230,7 +229,7 @@ void web_task(void *pvParameters) {
     });
     
     server.begin();
-    Serial.println("[WebTask] HTTP server started");
+    serial_line("[WebTask] HTTP server started");
     
     // Task loop - handle clients
     while (1) {

@@ -6,6 +6,7 @@
 #include "motor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
 #define SUPERVISOR_TASK_PERIOD_MS 20
@@ -43,6 +44,24 @@ static volatile system_state_t current_state = STATE_DISARMED;
 static system_state_t previous_state = STATE_DISARMED;
 #endif
 static volatile uint32_t last_heartbeat_ms = 0;
+
+// Age of the last heartbeat, or false if none has arrived yet.
+//
+// The age MUST be measured against a clock read AFTER the heartbeat. The loop
+// used to compute `current_ms - last_heartbeat_ms` with current_ms taken at the
+// top of the cycle. In between, this task prints (with Serial.flush(), several
+// ms at 115200) and LinkRxTask - higher priority, same core - stores a NEWER
+// heartbeat. The unsigned subtraction then wrapped to ~4e9 ms and the watchdog
+// fired right after every SYS_ARM, with commands arriving every 50 ms.
+static bool heartbeat_age_ms(uint32_t *age_ms) {
+    const uint32_t heartbeat = last_heartbeat_ms; // snapshot: read once
+    if (heartbeat == 0) {
+        return false;
+    }
+    const uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    *age_ms = (now >= heartbeat) ? (now - heartbeat) : 0;
+    return true;
+}
 static bool estop_triggered = false;
 
 void supervisor_task(void *pvParameters) {
@@ -55,21 +74,20 @@ void supervisor_task(void *pvParameters) {
     // entry sitting in the mailbox until its TTL expires is not re-executed.
     uint32_t last_processed_cmd_ts = 0;
 
-    Serial.println("[SupervisorTask] Supervisor task started");
+    serial_line("[SupervisorTask] Supervisor task started");
 
     // A-5: the 100 ms "give link_tx_task time to initialize" delay is gone.
     // The TX queue is now created in setup() before any task exists, so there is
     // nothing to wait for.
 
     // Print initial state and mode at boot
-    Serial.print("EVENT:STATE_CHANGED:");
-    Serial.println(current_state == STATE_DISARMED ? "DISARMED" :
+    serial_linef("EVENT:STATE_CHANGED:%s",
+                 current_state == STATE_DISARMED ? "DISARMED" :
                    current_state == STATE_ARMED ? "ARMED" :
                    current_state == STATE_RUNNING ? "RUNNING" : "FAULT");
     Serial.flush();
     
-    Serial.print("EVENT:MODE_CHANGED:");
-    Serial.println(current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
+    serial_linef("EVENT:MODE_CHANGED:%s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
     Serial.flush();
     
     // Also send via link_tx for UART transmission
@@ -77,7 +95,6 @@ void supervisor_task(void *pvParameters) {
     link_tx_send_mode_event(current_mode);
     
     while (1) {
-        uint32_t current_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
         
         // Read supervisor mailbox for commands
         topic_t topic;
@@ -103,21 +120,21 @@ void supervisor_task(void *pvParameters) {
                         if (current_state == STATE_DISARMED || current_state == STATE_FAULT) {
                             // Only rearm if the cause of the fault is gone
                             if (estop_is_triggered()) {
-                                Serial.println("EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE");
+                                serial_line("EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE");
                                 Serial.flush();
-                                Serial.println("[SupervisorTask] SYS_ARM rejected - E-STOP still active");
+                                serial_line("[SupervisorTask] SYS_ARM rejected - E-STOP still active");
                                 break;
                             }
                             current_state = STATE_ARMED;
-                            last_heartbeat_ms = current_ms;
-                            Serial.println("EVENT:CMD_EXECUTED:SYS_ARM");
+                            supervisor_update_heartbeat();
+                            serial_line("EVENT:CMD_EXECUTED:SYS_ARM");
                             Serial.flush();
-                            Serial.println("[SupervisorTask] System ARMED");
+                            serial_line("[SupervisorTask] System ARMED");
                             link_tx_send_state_event(current_state);
                         } else {
                             // Already armed: confirm anyway so the client does not hang
                             // waiting for EVENT:CMD_EXECUTED:SYS_ARM
-                            Serial.println("EVENT:CMD_EXECUTED:SYS_ARM");
+                            serial_line("EVENT:CMD_EXECUTED:SYS_ARM");
                             Serial.flush();
                         }
                         break;
@@ -130,9 +147,9 @@ void supervisor_task(void *pvParameters) {
                             // overwrites the stop within 10 ms.
                             motor_task_trigger_emergency();
                             mailbox_write(steer_mb, TOPIC_STEER, CMD_STOP, 0, 100);
-                            Serial.println("EVENT:CMD_EXECUTED:SYS_DISARM");
+                            serial_line("EVENT:CMD_EXECUTED:SYS_DISARM");
                             Serial.flush();
-                            Serial.println("[SupervisorTask] System DISARMED");
+                            serial_line("[SupervisorTask] System DISARMED");
                             link_tx_send_state_event(current_state);
                         }
                         break;
@@ -146,13 +163,11 @@ void supervisor_task(void *pvParameters) {
                                 // This prevents immediate watchdog timeout if last_heartbeat_ms was old
                                 if (current_mode == MODE_AUTO) {
                                     last_heartbeat_ms = 0;
-                                    Serial.println("[SupervisorTask] Heartbeat reset - waiting for first UART message");
+                                    serial_line("[SupervisorTask] Heartbeat reset - waiting for first UART message");
                                 }
-                                Serial.print("EVENT:CMD_EXECUTED:SYS_MODE:");
-                                Serial.println(current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
+                                serial_linef("EVENT:CMD_EXECUTED:SYS_MODE:%s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
                                 Serial.flush();
-                                Serial.print("[SupervisorTask] Mode changed to: ");
-                                Serial.println(current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
+                                serial_linef("[SupervisorTask] Mode changed to: %s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
                                 link_tx_send_mode_event(current_mode);
                             }
                         }
@@ -167,17 +182,17 @@ void supervisor_task(void *pvParameters) {
         // Check E-STOP GPIO
         bool estop_current = estop_is_triggered();
         if (estop_current && !estop_triggered) {
-            Serial.println("EVENT:ESTOP_TRIGGERED:GPIO");
+            serial_line("EVENT:ESTOP_TRIGGERED:GPIO");
             Serial.flush();
-            Serial.println("[SupervisorTask] E-STOP triggered via GPIO!");
+            serial_line("[SupervisorTask] E-STOP triggered via GPIO!");
             estop_triggered = true;
             current_state = STATE_FAULT;
             motor_task_trigger_emergency();
             mailbox_write(steer_mb, TOPIC_STEER, CMD_STOP, 0, 100);
         } else if (!estop_current && estop_triggered) {
-            Serial.println("EVENT:ESTOP_RELEASED");
+            serial_line("EVENT:ESTOP_RELEASED");
             Serial.flush();
-            Serial.println("[SupervisorTask] E-STOP released");
+            serial_line("[SupervisorTask] E-STOP released");
             estop_triggered = false;
         }
         
@@ -188,14 +203,13 @@ void supervisor_task(void *pvParameters) {
             uint32_t watchdog_timeout_ms = (current_mode == MODE_AUTO)
                                                ? WATCHDOG_TIMEOUT_AUTO_MS
                                                : WATCHDOG_TIMEOUT_MANUAL_MS;
-            if (last_heartbeat_ms > 0) {
-                uint32_t heartbeat_age = current_ms - last_heartbeat_ms;
+            uint32_t heartbeat_age;
+            if (heartbeat_age_ms(&heartbeat_age)) {
                 if (heartbeat_age > watchdog_timeout_ms) {
-                    Serial.println("EVENT:WATCHDOG_TIMEOUT");
+                    serial_line("EVENT:WATCHDOG_TIMEOUT");
                     Serial.flush();
-                    Serial.print("[SupervisorTask] Watchdog timeout! Heartbeat age: ");
-                    Serial.print(heartbeat_age);
-                    Serial.println(" ms");
+                    serial_linef("[SupervisorTask] Watchdog timeout! Heartbeat age: %lu ms",
+                                 (unsigned long)heartbeat_age);
                     current_state = STATE_FAULT;
                     motor_task_trigger_emergency();
                     mailbox_write(steer_mb, TOPIC_STEER, CMD_STOP, 0, 100);
@@ -207,10 +221,11 @@ void supervisor_task(void *pvParameters) {
         if (current_state == STATE_ARMED) {
             if (current_mode == MODE_AUTO) {
                 // In AUTO mode, transition to RUNNING if we have valid heartbeat
-                if (last_heartbeat_ms > 0 && (current_ms - last_heartbeat_ms) < WATCHDOG_TIMEOUT_AUTO_MS) {
+                uint32_t heartbeat_age;
+                if (heartbeat_age_ms(&heartbeat_age) && heartbeat_age < WATCHDOG_TIMEOUT_AUTO_MS) {
                     if (current_state != STATE_RUNNING) {
                         current_state = STATE_RUNNING;
-                        Serial.println("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
+                        serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
                         Serial.flush();
                     }
                 }
@@ -218,7 +233,7 @@ void supervisor_task(void *pvParameters) {
                 // In MANUAL mode, ARMED automatically transitions to RUNNING
                 if (current_state != STATE_RUNNING) {
                     current_state = STATE_RUNNING;
-                    Serial.println("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
+                    serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
                     Serial.flush();
                 }
             }
@@ -249,8 +264,7 @@ void supervisor_update_heartbeat(void) {
 void supervisor_trigger_fault(const char *reason) {
     if (current_state != STATE_FAULT) {
         current_state = STATE_FAULT;
-        Serial.print("EVENT:FAULT_TRIGGERED:");
-        Serial.println(reason != NULL ? reason : "UNKNOWN");
+        serial_linef("EVENT:FAULT_TRIGGERED:%s", reason != NULL ? reason : "UNKNOWN");
         Serial.flush();
     }
 }

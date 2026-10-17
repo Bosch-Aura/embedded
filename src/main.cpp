@@ -12,6 +12,7 @@
 #include "supervisor_task.h"
 #include "web_task.h"
 #include "ultrasonic_task.h"
+#include "serial_out.h"
 
 // Mailboxes
 static mailbox_t motor_mailbox;
@@ -33,19 +34,20 @@ static void create_task_or_die(TaskFunction_t fn, const char *name, uint32_t sta
     BaseType_t ok = xTaskCreatePinnedToCore(fn, name, stack, params, prio, NULL, core);
     if (ok != pdPASS)
     {
-        Serial.printf("EVENT:FATAL:TASK_CREATE_FAILED:%s\n", name);
+        serial_linef("EVENT:FATAL:TASK_CREATE_FAILED:%s", name);
         Serial.flush();
         // Safe state before restarting
         motor_stop();
         delay(100);
         esp_restart();
     }
-    Serial.printf("[main] %s created on Core %d, Priority %d\n", name, (int)core, (int)prio);
+    serial_linef("[main] %s created on Core %d, Priority %d", name, (int)core, (int)prio);
 }
 
 void setup(void)
 {
     Serial.begin(115200); // Match dashboard baudrate
+    serial_out_init();    // before anything prints: all lines go through it
 
     // M-1: hardware to a SAFE state first, before anything that can block.
     // Until hardware_init() runs, GPIO_MOTOR_IN3/IN4/ENB are in reset state
@@ -58,9 +60,9 @@ void setup(void)
     delay(3000);
 #endif
 
-    Serial.println("========================================");
-    Serial.println("ESP32 RC Car FreeRTOS System Starting...");
-    Serial.println("========================================");
+    serial_line("========================================");
+    serial_line("ESP32 RC Car FreeRTOS System Starting...");
+    serial_line("========================================");
 
     // Initialize mailboxes. A-12: a mailbox without its mutex is a permanently
     // dead command channel - do not boot with one.
@@ -69,20 +71,20 @@ void setup(void)
         !mailbox_init(&lights_mailbox) ||
         !mailbox_init(&supervisor_mailbox))
     {
-        Serial.println("EVENT:FATAL:MAILBOX_INIT_FAILED");
+        serial_line("EVENT:FATAL:MAILBOX_INIT_FAILED");
         Serial.flush();
         motor_stop();
         delay(100);
         esp_restart();
     }
 
-    Serial.println("[main] Mailboxes initialized");
+    serial_line("[main] Mailboxes initialized");
 
     // A-5: create the telemetry TX queue BEFORE any task exists, so no producer
     // can find it NULL and drop the initial state/mode events.
     if (!link_tx_init())
     {
-        Serial.println("EVENT:FATAL:TX_QUEUE_CREATE_FAILED");
+        serial_line("EVENT:FATAL:TX_QUEUE_CREATE_FAILED");
         Serial.flush();
         motor_stop();
         delay(100);
@@ -132,9 +134,9 @@ void setup(void)
     // UltrasonicTask - Core 0, Priority 5 (high priority for safety)
     create_task_or_die(ultrasonic_task, "UltrasonicTask", STACK_SIZE_4K, NULL, 5, 0);
 
-    Serial.println("[main] All tasks created. FreeRTOS scheduler running...");
-    Serial.println("[main] System ready!");
-    Serial.println("EVENT:SYSTEM_READY");
+    serial_line("[main] All tasks created. FreeRTOS scheduler running...");
+    serial_line("[main] System ready!");
+    serial_line("EVENT:SYSTEM_READY");
     Serial.flush();
 }
 

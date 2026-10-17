@@ -5,6 +5,7 @@
 #include "supervisor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
 #define MOTOR_TASK_PERIOD_MS 10 // 100 Hz
@@ -65,7 +66,7 @@ void motor_task(void *pvParameters)
     int32_t last_ignored_speed = -1; // Track last ignored speed command to avoid repeated logs
     int32_t last_reported_speed = -1; // Track last speed reported over the link to avoid repeated logs
 
-    Serial.println("[MotorTask] Motor task started");
+    serial_line("[MotorTask] Motor task started");
 
     while (1)
     {
@@ -75,9 +76,9 @@ void motor_task(void *pvParameters)
         uint32_t notification_value = ulTaskNotifyTake(pdTRUE, 0); // Clear notification bits
         if (notification_value > 0)
         {
-            Serial.println("EVENT:CMD_EXECUTED:EMERGENCY_BRAKE");
+            serial_line("EVENT:CMD_EXECUTED:EMERGENCY_BRAKE");
             Serial.flush();
-            Serial.println("[MotorTask] Emergency brake triggered!");
+            serial_line("[MotorTask] Emergency brake triggered!");
             motor_stop();
             lights_set_reverse(false);
             current_speed = 0;
@@ -87,7 +88,7 @@ void motor_task(void *pvParameters)
             has_valid_command = false;
             last_stop_timestamp = current_time;
             in_cooldown = true;
-            Serial.println("[MotorTask] 5 second cooldown started");
+            serial_line("[MotorTask] 5 second cooldown started");
             // Don't continue here - let it fall through to ensure motor stays stopped in cooldown check
         }
         
@@ -99,7 +100,7 @@ void motor_task(void *pvParameters)
             {
                 in_cooldown = false;
                 last_stop_timestamp = 0; // Reset
-                Serial.println("[MotorTask] Stop cooldown expired, motor can move again");
+                serial_line("[MotorTask] Stop cooldown expired, motor can move again");
             }
             else
             {
@@ -132,7 +133,7 @@ void motor_task(void *pvParameters)
                     if (!motor_control_allowed()) {
                         // Only print if this is a different command than the last ignored one
                         if (last_ignored_speed != value) {
-                            Serial.println("[MotorTask] SET_SPEED ignored - system DISARMED");
+                            serial_line("[MotorTask] SET_SPEED ignored - system DISARMED");
                             Serial.flush();
                             last_ignored_speed = value;
                         }
@@ -141,7 +142,7 @@ void motor_task(void *pvParameters)
                     // Only allow speed commands if not in cooldown
                     else if (in_cooldown)
                     {
-                        Serial.println("[MotorTask] Speed command ignored (in cooldown)");
+                        serial_line("[MotorTask] Speed command ignored (in cooldown)");
                         has_valid_command = false; // Treat as no command
                         // Reset ignored tracking when command can be executed but is in cooldown
                         last_ignored_speed = -1;
@@ -179,8 +180,7 @@ void motor_task(void *pvParameters)
                             if ((int32_t)current_speed != last_reported_speed)
                             {
                                 last_reported_speed = current_speed;
-                                Serial.print("EVENT:CMD_EXECUTED:SET_SPEED:");
-                                Serial.println(current_speed);
+                                serial_linef("EVENT:CMD_EXECUTED:SET_SPEED:%u", (unsigned)current_speed);
                                 Serial.flush();
                             }
                         }
@@ -217,7 +217,7 @@ void motor_task(void *pvParameters)
 
                 case CMD_BRAKE_NOW:
                 case CMD_STOP:
-                    Serial.println("EVENT:CMD_EXECUTED:BRAKE_NOW");
+                    serial_line("EVENT:CMD_EXECUTED:BRAKE_NOW");
                     Serial.flush();
                     motor_stop();
                     lights_set_reverse(false);
@@ -227,7 +227,7 @@ void motor_task(void *pvParameters)
                     dir_change_ts = 0;
                     last_stop_timestamp = current_time;
                     in_cooldown = true;
-                    Serial.println("[MotorTask] Motor stopped (brake/stop command), 5 second cooldown started");
+                    serial_line("[MotorTask] Motor stopped (brake/stop command), 5 second cooldown started");
                     break;
 
                 default:

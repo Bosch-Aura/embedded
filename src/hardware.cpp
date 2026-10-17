@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "hardware.h"
+#include "serial_out.h"
 #include <ESP32Servo.h>
 
 static const char *TAG = "hardware";
@@ -40,7 +41,7 @@ void hardware_init(void) {
     // Center servo on startup
     steer_set_angle(SERVO_CENTER);
     
-    Serial.println("Hardware initialized");
+    serial_line("Hardware initialized");
 }
 
 void motor_set_speed(uint8_t speed) {

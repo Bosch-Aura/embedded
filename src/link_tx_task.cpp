@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "serial_out.h"
 #include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,14 +32,14 @@ static QueueHandle_t tx_queue = NULL;
 bool link_tx_init(void) {
     tx_queue = xQueueCreate(TX_QUEUE_SIZE, sizeof(telemetry_msg_t));
     if (tx_queue == NULL) {
-        Serial.println("[LinkTxTask] Failed to create TX queue");
+        serial_line("[LinkTxTask] Failed to create TX queue");
         return false;
     }
     return true;
 }
 
 void link_tx_task(void *pvParameters) {
-    Serial.println("[LinkTxTask] LinkTx task started");
+    serial_line("[LinkTxTask] LinkTx task started");
     
     while (1) {
         telemetry_msg_t msg;
@@ -52,22 +53,24 @@ void link_tx_task(void *pvParameters) {
                     continue; // Skip to next iteration
                     
                 case MSG_TYPE_STATE_EVENT:
-                    snprintf(buffer, sizeof(buffer), "EVENT:STATE_CHANGED:%s\n",
+                    snprintf(buffer, sizeof(buffer), "EVENT:STATE_CHANGED:%s",
                              msg.state == STATE_DISARMED ? "DISARMED" :
                              msg.state == STATE_ARMED ? "ARMED" :
                              msg.state == STATE_RUNNING ? "RUNNING" : "FAULT");
-                    Serial.print(buffer);  // Also print to Serial (USB) for dashboard
+                    serial_line(buffer);   // Also print to Serial (USB) for dashboard
                     Serial.flush();        // Ensure it's sent immediately
                     Serial1.print(buffer); // And to Serial1 (UART)
+                    Serial1.print("\n");
                     Serial1.flush();
                     break;
                     
                 case MSG_TYPE_MODE_EVENT:
-                    snprintf(buffer, sizeof(buffer), "EVENT:MODE_CHANGED:%s\n",
+                    snprintf(buffer, sizeof(buffer), "EVENT:MODE_CHANGED:%s",
                              msg.mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                    Serial.print(buffer);  // Also print to Serial (USB) for dashboard
+                    serial_line(buffer);   // Also print to Serial (USB) for dashboard
                     Serial.flush();        // Ensure it's sent immediately
                     Serial1.print(buffer); // And to Serial1 (UART)
+                    Serial1.print("\n");
                     Serial1.flush();
                     break;
             }

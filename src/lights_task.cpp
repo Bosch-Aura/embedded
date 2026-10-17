@@ -4,6 +4,7 @@
 #include "messages.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
 #define LIGHTS_TASK_PERIOD_MS 1000 // 1 Hz for auto-mode checks
@@ -24,7 +25,7 @@ void lights_task(void *pvParameters)
 {
     lights_mailbox = (mailbox_t *)pvParameters;
 
-    Serial.println("[LightsTask] Lights task started");
+    serial_line("[LightsTask] Lights task started");
 
     while (1)
     {
@@ -47,7 +48,7 @@ void lights_task(void *pvParameters)
                     {
                         current_mode = LIGHTS_MODE_ON;
                         lights_set_headlights(true);
-                        Serial.println("EVENT:CMD_EXECUTED:LIGHTS_ON");
+                        serial_line("EVENT:CMD_EXECUTED:LIGHTS_ON");
                         Serial.flush();
                     } else {
                         // Mode didn't change, but still ensure lights are on
@@ -61,7 +62,7 @@ void lights_task(void *pvParameters)
                     {
                         current_mode = LIGHTS_MODE_OFF;
                         lights_set_headlights(false);
-                        Serial.println("EVENT:CMD_EXECUTED:LIGHTS_OFF");
+                        serial_line("EVENT:CMD_EXECUTED:LIGHTS_OFF");
                         Serial.flush();
                     } else {
                         // Mode didn't change, but still ensure lights are off
@@ -74,7 +75,7 @@ void lights_task(void *pvParameters)
                     if (current_mode != LIGHTS_MODE_AUTO)
                     {
                         current_mode = LIGHTS_MODE_AUTO;
-                        Serial.println("EVENT:CMD_EXECUTED:LIGHTS_AUTO");
+                        serial_line("EVENT:CMD_EXECUTED:LIGHTS_AUTO");
                         Serial.flush();
                     }
                     break;
