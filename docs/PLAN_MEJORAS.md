@@ -18,7 +18,7 @@ Rama `fix/plan-mejoras-fase0-fase2`. **Compila; NO probado en hardware.**
 | **Fase 0** | C-2, C-1, C-3, C-5, A-8, M-1, C-4 | ✅ **Implementada completa** |
 | **Fase 1** | A-11, A-6, A-3, A-9, A-12, A-5, A-10 | ✅ **Implementada completa** |
 | **Fase 2** | ítems 15-18 (A-13, M-10, A-1 doc, M-4/M-5/B-5) | ✅ Implementada (documentación) |
-| **Fase 3** | A-2, A-1 (código), A-4, A-7, M-2, M-3, M-5…M-14, B-1…B-7 | ❌ No implementada |
+| **Fase 3** | A-2, A-1 (código), A-4, A-7, M-2, M-3, M-5…M-14, B-1…B-7 | 🟡 Parcial: A-7, M-2, M-14, B-5 resueltos; A-4, M-5 parciales (ver actualización abajo) |
 
 **Adelantados desde Fase 3** (por ser dependencias directas de Fase 0/1):
 - **M-12** — `*expired` siempre inicializado en `mailbox_read` (`src/mailbox.cpp`). Con C-1, un
@@ -32,6 +32,18 @@ Rama `fix/plan-mejoras-fase0-fase2`. **Compila; NO probado en hardware.**
   expiran a los 200 ms y el auto frena; la UI enviaba un único AJAX por movimiento de slider.
 - `src/web_task.cpp`: `supervisor_update_heartbeat()` en los handlers de control, exigido
   explícitamente por la nota de C-4.
+
+**Actualización (2026-10-17):** el firmware ya se probó en el vehículo (82404b7, b4acb21). Cambios
+posteriores a esta tabla que conviene tener presentes al leer el resto del plan:
+- **C-1 se reemplazó por control *latching*** (82404b7): un comando vencido ya **no** frena; se
+  sostiene la última velocidad. La protección ante la pérdida de enlace es el watchdog en los dos
+  modos (C-4) más `FAULT` pegajoso. Lo de arriba de "tras C-1 los comandos expiran y el auto frena"
+  ya no aplica; la web mantiene el keep-alive a 10 Hz como latido.
+- **C-3 depende de un flag**: sin `-DBOOT_ARMED`, que es como compila hoy `platformio.ini`, el
+  sistema arranca `DISARMED` y hay que mandar `M:SYS_ARM:0`. Con el flag arranca `ARMED`.
+- **Resueltos de Fase 3:** A-7, M-2 (salida serie atómica), M-14, B-5. **Parciales:** A-4, M-5.
+  Marcado en cada hallazgo con una línea **Implementación:**.
+- Watchdog falso justo después de `SYS_ARM` (resta sin signo que daba la vuelta): corregido en b4acb21.
 
 **Pendiente de acción humana:**
 - **A-10** — `include/wifi_data.h` sigue en el historial de git y en los clones existentes.
@@ -499,6 +511,7 @@ Y:
 
 **Archivos:** `src/supervisor_task.cpp:18-22`, `:186-192`; consumidores en `src/motor_task.cpp:94-95` y `src/steer_task.cpp:35-36`
 **Estado:** [CONFIRMADO] (la ausencia de sincronización). [SOSPECHA] (que llegue a manifestarse un fallo observable)
+**Implementación:** 🟡 Parcial (82404b7, MEDIO-3) — `volatile` en `current_state`, `current_mode`, `last_heartbeat_ms` y `requested_direction`; `heartbeat_age_ms()` toma un snapshot del heartbeat (b4acb21). No hay sección crítica.
 
 ```cpp
 // src/supervisor_task.cpp:18-22 — sin volatile, sin mutex
@@ -665,6 +678,7 @@ Y mover `supervisor_update_heartbeat()` (`:107`) a **después** de haber despach
 
 **Archivos:** `src/web_task.cpp:60-66`, `:147-151`; `src/motor_task.cpp:139`, `:150`, `:194`
 **Estado:** [CONFIRMADO]
+**Implementación:** ✅ Resuelto (82404b7, 69c7780) — solo `MotorTask` toca el puente H (`motor_set_requested_direction()`), con 60 ms de tiempo muerto al invertir, también con la velocidad latcheada. Por serie el sentido se pide con `C:SET_DIR:<0|1>`; `SET_SPEED` sigue saturando los negativos a 0.
 
 Los *handlers* web fijan el sentido de giro llamando directamente al hardware:
 
@@ -1008,6 +1022,7 @@ Combinado con eliminar el `vTaskDelay(100)` de `supervisor_task.cpp:33` (ver A-5
 
 **Archivos:** todos los `src/*.cpp` (`main.cpp` 15 prints, `link_rx_task.cpp` 25, `supervisor_task.cpp` 24, `motor_task.cpp` 11, `web_task.cpp` 6, `steer_task.cpp` 6, `lights_task.cpp` 4, `ultrasonic_task.cpp` 4, `hardware.cpp` 1, `mailbox.cpp` 1)
 **Estado:** [CONFIRMADO] (el patrón). [SOSPECHA] (la frecuencia real de corrupción)
+**Implementación:** ✅ Resuelto con la opción 3 (b4acb21) — toda la salida por USB pasa por `serial_line()`/`serial_linef()` (`src/serial_out.h`), que escriben la línea entera bajo un mutex. Los `EVENT:` siguen sin pasar por `LinkTxTask` y la depuración sigue mezclada con el protocolo en el mismo puerto.
 
 La arquitectura define `LinkTxTask` (`src/link_tx_task.cpp`) precisamente como el punto único de salida de telemetría, con una cola. Pero **todas las demás tareas lo puentean** y llaman `Serial.print`/`println` directamente, incluyendo los eventos del protocolo:
 
@@ -1087,6 +1102,7 @@ Además, `E-STOP` limpia `estop_triggered` al soltarse (`:124-129`) pero **no re
 
 **Archivo:** `src/ultrasonic_task.cpp:19-30`
 **Estado:** [CONFIRMADO]
+**Implementación:** 🟡 Parcial (82404b7, ALTO-1) — el obstáculo ahora engancha `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`), así que el auto ya no rearranca solo contra el obstáculo. Sigue sin consultar el estado ni emitir la distancia.
 
 `UltrasonicTask` llama `motor_task_trigger_emergency()` sin consultar `supervisor_get_state()`. Efectos:
 
@@ -1393,6 +1409,7 @@ Lo mismo con `last_heartbeat_ms` → `bool heartbeat_received`.
 
 **Archivo:** `src/link_rx_task.cpp:22`, `:35`, `:43`, `:61`
 **Estado:** [CONFIRMADO]
+**Implementación:** ✅ Resuelto — el parser trabaja sobre un buffer en el stack, sin `strdup`/`free`.
 
 ```cpp
 // src/link_rx_task.cpp:22
@@ -1439,6 +1456,8 @@ static bool parse_uart_message(const char *msg, char *channel, char *cmd,
 `src/link_rx_task.cpp:99` — `read_line_from` ya termina el buffer en `:75`. Inofensivo (`len` está acotado), pero duplicado. Desaparece al aplicar A-6.
 
 ### B-5. `EVENT:SYSTEM_READY` no está en el protocolo
+**Implementación:** ✅ Resuelto (documentación) — el catálogo de eventos de `docs/BRAIN_TEAM_PROTOCOL.md` está completo.
+
 `src/main.cpp:163` emite `EVENT:SYSTEM_READY`, pero `docs/BRAIN_TEAM_PROTOCOL.md` no documenta ningún evento de salida. El equipo Brain no tiene forma de saber qué esperar. Documentar el catálogo completo de eventos: `SYSTEM_READY`, `STATE_CHANGED`, `MODE_CHANGED`, `CMD_RECEIVED:*`, `CMD_EXECUTED:*`, `ESTOP_TRIGGERED`, `ESTOP_RELEASED`, `WATCHDOG_TIMEOUT`.
 
 ### B-6. Flags de compilación sin usar

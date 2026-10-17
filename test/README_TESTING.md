@@ -1,42 +1,55 @@
 # Quick Testing Guide
 
+> **Actualizado.** Esta guía decía que el UART externo iba en GPIO 9/10, usaba flags del
+> simulador que no existen (`-p`, `--demo`) y apuntaba a archivos que no están en el repo
+> (`test/test_commands.txt`, `docs/TESTING_WITHOUT_JETSON.md`). Lo de abajo refleja el firmware
+> actual. La referencia del protocolo es `docs/BRAIN_TEAM_PROTOCOL.md`.
+
 ## Testing Without Jetson
 
-### Option 1: Python Simulator (Easiest)
+### Opción 1: simulador en Python (la más fácil)
+
+No hace falta adaptador: el firmware también lee comandos por el **USB** (115200 baud).
 
 ```bash
-# Install dependencies
-pip install pyserial
+# Dependencias
+pip install -r test/python/requirements.txt
 
-# Run interactive simulator
-python3 test/test_uart_simulator.py -p /dev/ttyUSB0
+# Simulador interactivo (el puerto es posicional; si se omite, lo pregunta)
+python3 test/python/test_uart_simulator.py /dev/ttyUSB0          # PC
+python3 test/python/test_uart_simulator.py /dev/ttyCH341USB0     # Jetson (driver WCH)
 
-# Or run demo sequence
-python3 test/test_uart_simulator.py -p /dev/ttyUSB0 --demo
+# Dentro del simulador, "demo" corre una secuencia de zigzag
 ```
 
-### Option 2: Serial Terminal
+`test/test_uart_simulator.py` (el de la raíz de `test/`) es una versión vieja que manda
+`CONTROL:...`/`LIGHTS:...` y usa 921600 por defecto: usá el de `test/python/`.
 
-1. Connect serial adapter to GPIO 9 (TX) and GPIO 10 (RX)
-2. Open serial terminal at **921600 baud**
-3. Send commands from `test/test_commands.txt`
+El simulador **no manda `M:PING:0`** por su cuenta: escribiendo a mano, al segundo sin comandos
+el watchdog de MANUAL lleva el sistema a `FAULT`. Ver `test/QUICK_UART_TEST.md`.
 
-### Option 3: Web Interface (MANUAL Mode)
+### Opción 2: terminal serie
 
-1. Connect to Wi-Fi: `RC-Car-ESP32`
-2. Open: `http://192.168.4.1`
-3. Click ARM and use controls
+- **Por USB:** 115200 baud, el mismo puerto que usa `pio device monitor`.
+- **Por el UART externo:** adaptador en **GPIO 17 (TX)** y **GPIO 16 (RX)** del ESP32, a **921600 baud**.
+  Por ahí solo vuelven `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`; el resto de la salida sale por USB.
+
+### Opción 3: interfaz web
+
+1. Conectarse al Wi-Fi `RC-Car-ESP32` (abierto)
+2. Abrir `http://192.168.4.1`
+3. Usar ARMAR / DESARMAR / E-STOP, el slider de velocidad y el volante
 
 ## Quick Test Commands
 
 ```
-M:SYS_ARM           # ARM system
-M:SYS_MODE:1        # Switch to AUTO
-C:SET_SPEED:128     # Set speed
-C:SET_STEER:90      # Set steering
-E:BRAKE_NOW         # Emergency brake
-M:SYS_DISARM        # Disarm
+M:SYS_MODE:1        # Pasar a AUTO
+M:SYS_ARM:0         # Armar (obligatorio: arranca desarmado)
+C:SET_SPEED:150     # Velocidad (latching: queda sostenida; por debajo de ~140 no arranca)
+C:SET_STEER:105     # Dirección (50 izquierda, 105 centro, 160 derecha)
+M:PING:0            # Latido: hay que mandarlo (o cualquier comando) a 10 Hz
+E:BRAKE_NOW:0       # Freno de emergencia (bloqueo de 5 s)
+M:SYS_DISARM:0      # Desarmar
 ```
 
-See `docs/TESTING_WITHOUT_JETSON.md` for complete guide.
-
+Ver `test/TESTING_WITHOUT_JETSON.md` para la guía completa.
