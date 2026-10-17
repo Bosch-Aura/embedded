@@ -17,7 +17,7 @@ Este diseño prioriza la estabilidad del bucle de control y la simplicidad en la
 El diseño actual se fundamenta en los siguientes principios:
 
 * **Determinismo de Ciclo:** Las tareas de actuación (Motor/Dirección) mantienen una cadencia fija de 100Hz (10ms), lo que asegura que el PWM se actualice de forma constante.
-* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura, llevando el vehículo a un estado seguro ante la pérdida de enlace.
+* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura. Si el comando expira, **`MotorTask` frena** (fail-safe); el lazo completo está además guardado por el estado del sistema, de modo que `DISARM` y `FAULT` detienen la tracción y la mantienen detenida.
 * **Separación de Recursos:** Se utiliza *Core Pinning* para aislar el procesamiento de comunicaciones (Core 1) de la ejecución crítica de movimiento (Core 0).
 
 ## 2. Estrategia de Comunicación Inter-Procesos (IPC)
@@ -36,7 +36,7 @@ Para garantizar la seguridad crítica, el sistema implementa un canal de comunic
 * **Mecanismo de Acción:**
     1.  **Notificación Directa:** Se utiliza un mecanismo de señalización asíncrono (Event Flags) para enviar una alerta directa a la tarea de control, evitando la cola de espera del *polling*.
     2.  **Despertar Inmediato:** Al recibir esta señal, la Tarea de Motor interrumpe su estado de suspensión (`Sleep`) instantáneamente, sin esperar a que se cumpla el tiempo del ciclo.
-    3.  **Prioridad de Ejecución:** La lógica de emergencia se evalúa antes que cualquier comando de movimiento estándar, asegurando una reacción en tiempo real estricto (<1ms).
+    3.  **Prioridad de Ejecución:** La lógica de emergencia se evalúa antes que cualquier comando de movimiento estándar. **Latencia real: hasta ~50 ms en el peor caso** (polling de `LinkRxTask` 10 ms + ciclo de `MotorTask` 10 ms + bloqueo de `pulseIn()` del ultrasonido hasta 30 ms). La notificación no interrumpe el `vTaskDelay()` del lazo: ver hallazgos A-1 y A-2 de `docs/PLAN_MEJORAS.md`.
 
 * **Fuentes de Disparo:**
     * **Sensores Físicos:** Ultrasonido (barrera de proximidad).
@@ -47,7 +47,7 @@ Para garantizar la seguridad crítica, el sistema implementa un canal de comunic
 | :--- | :--- | :--- |
 | **Mecanismo** | `mailbox_write()` | `motor_task_trigger_emergency()` |
 | **Activación** | Polling (Timer) | Notificación Directa |
-| **Latencia** | Variable (0-10ms) | Inmediata (<1ms) |
+| **Latencia** | Variable (0-10ms) | Hasta ~50ms peor caso (ver A-1) |
 
 ### 2.3 Características Operativas (Limitaciones)
 * **Previsibilidad vs Latencia:** La carga de la CPU es constante, pero existe un *jitter* inherente en la respuesta a comandos normales.
@@ -75,16 +75,17 @@ typedef struct {
 El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gestión del Estado del Sistema**.
 
 * **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` → `FAULT`).
+* **Estado inicial:** el sistema **arranca `DISARMED`**. Ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
 * **Fuentes de Comandos:** `link_rx_task` (UART) y `web_task` (HTTP).
 
 | Comando | Acción | Transición Típica |
 | :--- | :--- | :--- |
-| **CMD_SYS_ARM** | Habilita el sistema y resetea heartbeat. | `DISARMED` → `ARMED` |
-| **CMD_SYS_DISARM** | Detiene motor, centra dirección y deshabilita. | `ANY` → `DISARMED` |
+| **CMD_SYS_ARM** | Habilita el sistema y resetea heartbeat. Rechazado si el E-STOP sigue accionado. | `DISARMED`/`FAULT` → `ARMED` |
+| **CMD_SYS_DISARM** | Notifica emergencia a `MotorTask`, centra dirección vía mailbox y deshabilita. | `ANY` → `DISARMED` |
 | **CMD_SYS_MODE** | Cambia lógica de control (`AUTO` vs `MANUAL`). | Afecta Watchdog |
 
 * **Funciones Adicionales:**
-    * **Watchdog/Heartbeat:** En modo `AUTO`, verifica recepción constante de datos. Si falla, desarma el sistema.
+    * **Watchdog/Heartbeat:** verifica recepción constante de datos en **ambos modos** (300 ms en `AUTO`, 1000 ms en `MANUAL`). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
     * **E-STOP Hardware:** Monitoreo directo de pin GPIO para parada de emergencia física.
     * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING`.
 
@@ -122,7 +123,7 @@ sequenceDiagram
     Safety->>Safety: Obstáculo Detectado!
     
     rect rgb(60, 20, 20)
-        note right of Safety: Fast Path (<1ms)
+        note right of Safety: Fast Path (~50ms peor caso, ver A-1)
         Safety->>Consumer: xTaskNotify(EMERGENCY)
         Note over Consumer: DESPIERTA INMEDIATAMENTE
         Consumer->>Consumer: STOP MOTOR
@@ -200,7 +201,7 @@ La arquitectura actual (v2.0) proporciona una base sólida y estable. Sin embarg
 * **Estabilidad de Carga (Determinismo):** Al utilizar una frecuencia de ejecución fija, el consumo de CPU es constante y predecible. El sistema es inmune a "tormentas de interrupciones" si los sensores envían datos excesivos o ruidosos.
 * **Integridad de Datos:** El patrón de **Mailbox con Mutex** garantiza que las tareas de control siempre accedan a una "foto" coherente y completa del estado (Atomicidad), eliminando condiciones de carrera sobre las variables de control.
 * **Aislamiento de Fallos:** La estrategia de **Core Pinning** ha demostrado ser eficaz para evitar que la latencia variable de la pila WiFi/TCP-IP (Core 1) afecte la generación de señales PWM críticas (Core 0).
-* **Seguridad Híbrida:** A pesar de ser un sistema basado en *polling*, la implementación del **Fast-Path de Emergencia** asegura que las paradas críticas (por ultrasonido o botón de pánico) ocurran en tiempo real estricto (<1ms), eludiendo el ciclo de espera.
+* **Seguridad Híbrida:** el sistema es de *polling*. El **Fast-Path de Emergencia** evalúa la notificación al principio del ciclo, pero **no** elude la espera: `ulTaskNotifyTake()` se usa con timeout 0 y el lazo bloquea en `vTaskDelay()`, que las notificaciones no interrumpen. La latencia de parada es de hasta ~50 ms en el peor caso. Implementar A-1 (`docs/PLAN_MEJORAS.md`) la reduciría a <1 ms real.
 
 ### 6.2 Áreas de Optimización
 1.  **Reducción de Latencia:** En el modelo actual, el tiempo de respuesta está acotado por el periodo de muestreo (10ms). Una arquitectura basada en eventos eliminaría esta espera.

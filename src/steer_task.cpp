@@ -5,6 +5,7 @@
 #include "supervisor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
 #define STEER_TASK_PERIOD_MS 10  // 100 Hz
@@ -17,7 +18,7 @@ void steer_task(void *pvParameters) {
     uint16_t current_angle = SERVO_CENTER;
     int32_t last_ignored_angle = -1; // Track last ignored angle command to avoid repeated logs
     
-    Serial.println("[SteerTask] Steer task started");
+    serial_line("[SteerTask] Steer task started");
     
     while (1) {
         // Read mailbox for steering commands
@@ -47,7 +48,7 @@ void steer_task(void *pvParameters) {
                         if (!can_control) {
                             // Only print if this is a different command than the last ignored one
                             if (last_ignored_angle != value) {
-                                Serial.println("[SteerTask] SET_STEER ignored - system DISARMED");
+                                serial_line("[SteerTask] SET_STEER ignored - system DISARMED");
                                 Serial.flush();
                                 last_ignored_angle = value;
                             }
@@ -57,19 +58,20 @@ void steer_task(void *pvParameters) {
                         // Reset ignored tracking when command can be executed
                         last_ignored_angle = -1;
                         
-                        uint16_t new_angle = (uint16_t)value;
-                        // Clamp angle to valid range
-                        if (new_angle < SERVO_LEFT) {
-                            new_angle = SERVO_LEFT;
-                        } else if (new_angle > SERVO_RIGHT) {
-                            new_angle = SERVO_RIGHT;
+                        // A-8: clamp in the SIGNED type, before narrowing to uint16_t.
+                        // Casting first turned -30 into 65506, which then clamped to
+                        // SERVO_RIGHT: a left command produced full RIGHT lock.
+                        if (value < SERVO_LEFT) {
+                            value = SERVO_LEFT;
+                        } else if (value > SERVO_RIGHT) {
+                            value = SERVO_RIGHT;
                         }
+                        uint16_t new_angle = (uint16_t)value;
                         // Only execute and print if angle actually changed
                         if (new_angle != current_angle) {
                             current_angle = new_angle;
                             steer_set_angle(current_angle);
-                            Serial.print("EVENT:CMD_EXECUTED:SET_STEER:");
-                            Serial.println(current_angle);
+                            serial_linef("EVENT:CMD_EXECUTED:SET_STEER:%u", (unsigned)current_angle);
                             Serial.flush();
                         }
                         break;
@@ -80,9 +82,9 @@ void steer_task(void *pvParameters) {
                         if (current_angle != SERVO_CENTER) {
                             current_angle = SERVO_CENTER;
                             steer_set_angle(current_angle);
-                            Serial.println("EVENT:CMD_EXECUTED:SET_STEER_CENTER");
+                            serial_line("EVENT:CMD_EXECUTED:SET_STEER_CENTER");
                             Serial.flush();
-                            Serial.println("[SteerTask] Steering centered (stop command)");
+                            serial_line("[SteerTask] Steering centered (stop command)");
                         }
                         break;
                         

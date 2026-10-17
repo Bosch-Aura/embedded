@@ -35,3 +35,5 @@ lib/dependencies/
 
 venv/
 __pycache__/
+# Credenciales locales (ver include/wifi_data.h.example)
+include/wifi_data.h

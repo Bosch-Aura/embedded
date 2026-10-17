@@ -1,8 +1,9 @@
 #include "mailbox.h"
 #include "freertos/FreeRTOS.h"
+#include "serial_out.h"
 #include <Arduino.h>
 
-void mailbox_init(mailbox_t *mb) {
+bool mailbox_init(mailbox_t *mb) {
     mb->ts_ms = 0;
     mb->topic = TOPIC_MOTOR;
     mb->cmd = CMD_UNKNOWN;
@@ -12,8 +13,12 @@ void mailbox_init(mailbox_t *mb) {
     mb->valid = false;
     mb->mutex = xSemaphoreCreateMutex();
     if (mb->mutex == NULL) {
-        Serial.println("[Mailbox] Failed to create mailbox mutex");
+        // A-12: without the mutex every read/write silently returns false, i.e. a
+        // permanently dead command channel. The caller must not ignore this.
+        serial_line("[Mailbox] Failed to create mailbox mutex");
+        return false;
     }
+    return true;
 }
 
 bool mailbox_write(mailbox_t *mb, topic_t topic, command_type_t cmd, int32_t value, uint32_t ttl_ms) {
@@ -41,6 +46,12 @@ bool mailbox_read(mailbox_t *mb, topic_t *topic, command_type_t *cmd, int32_t *v
     }
 
     bool result = false;
+    // M-12: always initialise the output parameter, pessimistically. If the mutex
+    // times out or the mailbox was never written, the caller must see "expired"
+    // rather than an uninitialised stack value. With C-1 that means "brake".
+    if (expired != NULL) {
+        *expired = true;
+    }
     if (xSemaphoreTake(mb->mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (mb->valid) {
             uint32_t current_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
