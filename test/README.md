@@ -9,7 +9,7 @@ This directory contains unit tests and integration tests for the RC car system.
 > (`manual_test_guide.md`, `QUICK_UART_TEST.md`, `TESTING_WITHOUT_JETSON.md`).
 >
 > Si se escriben, tener en cuenta que el firmware actual **no** es el que asume esta lista: el
-> estado inicial depende de `-DBOOT_ARMED` (hoy arranca `ARMED`), el control es *latching* (un
+> estado inicial depende de `-DBOOT_ARMED` (hoy arranca `DISARMED`), el control es *latching* (un
 > comando de control vencido no frena) y el watchdog es de 300 ms en AUTO y 1000 ms en MANUAL.
 
 ## Test Files

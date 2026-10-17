@@ -39,8 +39,8 @@ posteriores a esta tabla que conviene tener presentes al leer el resto del plan:
   sostiene la última velocidad. La protección ante la pérdida de enlace es el watchdog en los dos
   modos (C-4) más `FAULT` pegajoso. Lo de arriba de "tras C-1 los comandos expiran y el auto frena"
   ya no aplica; la web mantiene el keep-alive a 10 Hz como latido.
-- **C-3 quedó condicionado a un flag**: `platformio.ini` compila con `-DBOOT_ARMED`, así que hoy el
-  sistema arranca `ARMED`. Sin el flag arranca `DISARMED`.
+- **C-3 depende de un flag**: sin `-DBOOT_ARMED`, que es como compila hoy `platformio.ini`, el
+  sistema arranca `DISARMED` y hay que mandar `M:SYS_ARM:0`. Con el flag arranca `ARMED`.
 - **Resueltos de Fase 3:** A-7, M-2 (salida serie atómica), M-14, B-5. **Parciales:** A-4, M-5.
   Marcado en cada hallazgo con una línea **Implementación:**.
 - Watchdog falso justo después de `SYS_ARM` (resta sin signo que daba la vuelta): corregido en b4acb21.

@@ -10,7 +10,7 @@ This guide explains how to test the AUTO mode and UART communication without a J
 > - **Control *latching***: un `C:SET_SPEED` queda sostenido; vencido el TTL de 200 ms el motor no frena.
 > - **Watchdog en los dos modos**: 300 ms en AUTO, 1000 ms en MANUAL. Sin ningún comando válido en
 >   ese tiempo, `FAULT` + freno. `M:PING:0` lo alimenta sin hacer nada más.
-> - **Arranque**: con `-DBOOT_ARMED` (hoy en `platformio.ini`) arranca `ARMED`; sin él, `DISARMED`.
+> - **Arranque**: arranca `DISARMED` (así está hoy `platformio.ini`); con `-DBOOT_ARMED`, `ARMED`.
 > - **Ultrasonido activo**: un objeto a menos de 30 cm lleva el sistema a `FAULT`.
 
 ## Methods

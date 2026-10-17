@@ -5,8 +5,8 @@ This guide helps you manually test the RC car system functionality when automate
 > **Actualizado.** Corregido contra el firmware actual: la página web ya no tiene botones
 > adelante/atrás/izquierda/derecha ni selector de modo (tiene ARMAR / DESARMAR / E-STOP, luces,
 > slider de velocidad y volante), el UART externo va en GPIO 17/16, el watchdog es de 300 ms en AUTO
-> y 1000 ms en MANUAL, el freno tarda hasta ~50 ms y, con `-DBOOT_ARMED` (hoy en `platformio.ini`),
-> la placa arranca `ARMED`/`RUNNING` en vez de `DISARMED`. Referencia: `docs/BRAIN_TEAM_PROTOCOL.md`.
+> y 1000 ms en MANUAL, el freno tarda hasta ~50 ms y la placa arranca `DISARMED` (solo con
+> `-DBOOT_ARMED`, que hoy no está en `platformio.ini`, arranca `ARMED`/`RUNNING`). Referencia: `docs/BRAIN_TEAM_PROTOCOL.md`.
 
 ## Prerequisites
 

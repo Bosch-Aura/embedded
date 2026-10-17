@@ -8,11 +8,11 @@ Este documento describe cómo enviar comandos desde el sistema Brain (Jetson/PC)
 
 | Compilación | Estado al arrancar | Qué pasa |
 |---|---|---|
-| **Con `-DBOOT_ARMED`** (es la que está hoy en `platformio.ini`) | `ARMED`, modo `MANUAL` | En MANUAL pasa solo a `RUNNING` (`EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING`): el **primer** `C:SET_SPEED` que llegue se obedece, sin handshake. |
-| **Sin `-DBOOT_ARMED`** (comentando esa línea) | `DISARMED`, modo `MANUAL` | Ningún comando de control se ejecuta hasta recibir `M:SYS_ARM:0`. Es la opción más segura (corrección C-3). |
+| **Con `-DBOOT_ARMED`** (agregándolo a `build_flags`) | `ARMED`, modo `MANUAL` | En MANUAL pasa solo a `RUNNING` (`EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING`): el **primer** `C:SET_SPEED` que llegue se obedece, sin handshake. |
+| **Sin `-DBOOT_ARMED`** (es la que está hoy en `platformio.ini`) | `DISARMED`, modo `MANUAL` | Ningún comando de control se ejecuta hasta recibir `M:SYS_ARM:0`. Es la opción más segura (corrección C-3). |
 
-Versiones anteriores de este documento decían "el sistema inicia DESARMADO por defecto"; con el
-`platformio.ini` actual eso **no** es cierto. No dependas de ninguno de los dos: **mandá siempre
+Con el `platformio.ini` actual la placa **arranca `DISARMED`**: el cliente tiene que mandar
+`M:SYS_ARM:0` para que obedezca. Igual, no dependas de la compilación: **mandá siempre
 `M:SYS_ARM:0` al conectar**. Es idempotente (si ya estaba armado responde igual
 `EVENT:CMD_EXECUTED:SYS_ARM`) y funciona con las dos compilaciones.
 
@@ -231,8 +231,8 @@ en AUTO (1000 ms en MANUAL). Mandalo a **10 Hz** (ver §TTL).
   esta vivo del lado cliente, usa el `EVENT:CMD_RECEIVED:SET_SPEED:<v>` de cada `SET_SPEED`).
 
 #### `M:SYS_ARM:0`
-Arma el sistema. Con la compilación actual (`-DBOOT_ARMED`) la placa ya arranca armada, pero
-**mandalo igual** al conectar y es el único camino para salir de `FAULT` (ver §Sistema de Seguridad).
+Arma el sistema. Con la compilación actual la placa arranca desarmada, así que hay que
+**mandarlo** al conectar y es el único camino para salir de `FAULT` (ver §Sistema de Seguridad).
 
 - **Valor**: Siempre 0
 - **TTL**: 5000 ms en el mailbox, pero se ejecuta **una sola vez** por comando recibido
@@ -291,7 +291,7 @@ while b"EVENT:SYSTEM_READY" not in ser.readline():
 ser.write(b"M:SYS_MODE:1\n")  # 1 = AUTO, 0 = MANUAL
 time.sleep(0.1)               # no mandar dos M: pegados
 
-# 2. Armar sistema (con -DBOOT_ARMED ya arranca armado, pero mandarlo no cuesta nada)
+# 2. Armar sistema (obligatorio: la placa arranca desarmada)
 ser.write(b"M:SYS_ARM:0\n")
 time.sleep(0.1)
 

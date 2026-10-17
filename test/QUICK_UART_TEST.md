@@ -186,7 +186,7 @@ EVENT:CMD_EXECUTED:SYS_ARM
 EVENT:CMD_RECEIVED:SET_SPEED:150
 EVENT:CMD_EXECUTED:SET_SPEED:150
 ```
-Si ya estaba armado (con `-DBOOT_ARMED` arranca así), igual llega `CMD_EXECUTED:SYS_ARM`. Si entre
+Si ya estaba armado (por ejemplo, compilado con `-DBOOT_ARMED`), igual llega `CMD_EXECUTED:SYS_ARM`. Si entre
 `arm` y `speed` pasó más de 1 s, antes llega `EVENT:WATCHDOG_TIMEOUT` y la velocidad se ignora
 (ver Scenario 2). En AUTO el margen es de 300 ms: a mano no da, hace falta un script.
 

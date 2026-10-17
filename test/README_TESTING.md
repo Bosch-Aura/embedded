@@ -44,7 +44,7 @@ el watchdog de MANUAL lleva el sistema a `FAULT`. Ver `test/QUICK_UART_TEST.md`.
 
 ```
 M:SYS_MODE:1        # Pasar a AUTO
-M:SYS_ARM:0         # Armar (con -DBOOT_ARMED ya arranca armado, mandarlo igual)
+M:SYS_ARM:0         # Armar (obligatorio: arranca desarmado)
 C:SET_SPEED:150     # Velocidad (latching: queda sostenida; por debajo de ~140 no arranca)
 C:SET_STEER:105     # Dirección (50 izquierda, 105 centro, 160 derecha)
 M:PING:0            # Latido: hay que mandarlo (o cualquier comando) a 10 Hz
