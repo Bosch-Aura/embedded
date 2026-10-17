@@ -2,6 +2,16 @@
 
 This directory contains unit tests and integration tests for the RC car system.
 
+> **Ojo: hoy no hay tests unitarios en el repo.** Los archivos `test_*.cpp` que se listan abajo
+> no existen, así que `pio test` no tiene nada que correr. Esta sección describe la suite
+> prevista. Lo que sí hay: el simulador `test/python/test_uart_simulator.py`, el monitor
+> `test/python/telemetry_monitor.py`, `test/validate_code.sh` y las guías manuales
+> (`manual_test_guide.md`, `QUICK_UART_TEST.md`, `TESTING_WITHOUT_JETSON.md`).
+>
+> Si se escriben, tener en cuenta que el firmware actual **no** es el que asume esta lista: el
+> estado inicial depende de `-DBOOT_ARMED` (hoy arranca `ARMED`), el control es *latching* (un
+> comando de control vencido no frena) y el watchdog es de 300 ms en AUTO y 1000 ms en MANUAL.
+
 ## Test Files
 
 - **test_mailbox.cpp**: Tests for mailbox functionality (read/write, expiration, last-writer-wins)
@@ -62,11 +72,11 @@ The tests use Unity test framework (included with PlatformIO). Each test file:
 - ✅ Negative value parsing
 
 ### State Machine Tests
-- ✅ Initial state (DISARMED)
+- ✅ Initial state (DISARMED sin `-DBOOT_ARMED`, ARMED con él)
 - ✅ DISARMED → ARMED transition
 - ✅ ARMED → DISARMED transition
 - ✅ ARMED → RUNNING transition (with heartbeat)
-- ✅ Heartbeat timeout → FAULT
+- ✅ Heartbeat timeout → FAULT (300 ms AUTO / 1000 ms MANUAL)
 - ✅ Mode switching (MANUAL ↔ AUTO)
 - ✅ E-STOP → FAULT transition
 - ✅ Invalid transition prevention

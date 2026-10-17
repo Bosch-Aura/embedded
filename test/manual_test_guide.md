@@ -2,12 +2,19 @@
 
 This guide helps you manually test the RC car system functionality when automated tests aren't sufficient or for hardware validation.
 
+> **Actualizado.** Corregido contra el firmware actual: la página web ya no tiene botones
+> adelante/atrás/izquierda/derecha ni selector de modo (tiene ARMAR / DESARMAR / E-STOP, luces,
+> slider de velocidad y volante), el UART externo va en GPIO 17/16, el watchdog es de 300 ms en AUTO
+> y 1000 ms en MANUAL, el freno tarda hasta ~50 ms y, con `-DBOOT_ARMED` (hoy en `platformio.ini`),
+> la placa arranca `ARMED`/`RUNNING` en vez de `DISARMED`. Referencia: `docs/BRAIN_TEAM_PROTOCOL.md`.
+
 ## Prerequisites
 
 - ESP32 board connected via USB
 - Serial monitor open (115200 baud)
 - Wi-Fi capable device (phone/laptop) for web interface testing
-- Optional: UART device (Jetson or serial terminal) for AUTO mode testing
+- Optional: UART device (Jetson or serial terminal) for AUTO mode testing. Los comandos también se pueden mandar por el mismo USB.
+- Ningún objeto a menos de 30 cm delante del ultrasonido: si no, el sistema entra en `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`)
 
 ## Test Procedures
 
@@ -20,6 +27,7 @@ This guide helps you manually test the RC car system functionality when automate
 2. Open serial monitor
 3. Verify you see:
    ```
+   Hardware initialized
    ========================================
    ESP32 RC Car FreeRTOS System Starting...
    ========================================
@@ -31,9 +39,15 @@ This guide helps you manually test the RC car system functionality when automate
    [main] SupervisorTask created on Core 1, Priority 2
    [main] LinkTxTask created on Core 1, Priority 2
    [main] WebTask created on Core 1, Priority 2
+   [main] UltrasonicTask created on Core 0, Priority 5
    [main] All tasks created. FreeRTOS scheduler running...
    [main] System ready!
+   EVENT:SYSTEM_READY
    ```
+   Intercaladas aparecen las líneas `[XxxTask] ... task started` y el estado inicial
+   (`EVENT:STATE_CHANGED:ARMED` con `-DBOOT_ARMED`, `DISARMED` sin él, más `EVENT:MODE_CHANGED:MANUAL`).
+   Cada línea llega entera: si ves dos eventos pegados en una línea, la placa tiene un firmware
+   anterior a b4acb21.
 
 **Expected Result**: All tasks start without errors
 
@@ -63,13 +77,12 @@ This guide helps you manually test the RC car system functionality when automate
 1. Connect to Wi-Fi AP "RC-Car-ESP32"
 2. Open browser and navigate to `http://192.168.4.1`
 3. Verify you see the control interface with:
-   - Mode selector buttons (MANUAL/AUTO)
-   - ARM/DISARM buttons
-   - BRAKE button
-   - Status overlay showing mode and state
-   - Control buttons (forward, back, left, right)
-   - Lights controls
-   - Speed slider
+   - ARMAR / DESARMAR buttons
+   - E-STOP button (freno de emergencia)
+   - Status line showing state and mode (`Estado: <estado> / <modo>`)
+   - Lights controls (off / on / auto)
+   - Vertical speed slider (-255 a 255: arriba adelante, abajo atrás)
+   - Steering wheel
 
 **Expected Result**: Web page loads completely, all buttons visible
 
@@ -81,11 +94,11 @@ This guide helps you manually test the RC car system functionality when automate
 
 **Steps**:
 1. Open web interface
-2. Check status overlay shows "DISARMED"
-3. Click "ARM" button
-4. Verify status changes to "ARMED"
-5. Click "DISARM" button
-6. Verify status changes back to "DISARMED"
+2. Check status line: con `-DBOOT_ARMED` muestra `RUNNING` desde el arranque; sin él, `DISARMED`
+3. Click "DESARMAR" (si estaba armado) y verificar `DISARMED`
+4. Click "ARMAR" button
+5. Verify status changes to "RUNNING" (en MANUAL, `ARMED` pasa solo a `RUNNING`)
+6. Click "DESARMAR" and verify status changes back to "DISARMED"
 
 **Expected Result**: 
 - State transitions work correctly
@@ -98,18 +111,18 @@ This guide helps you manually test the RC car system functionality when automate
 **Objective**: Verify motor control in MANUAL mode
 
 **Steps**:
-1. Set mode to MANUAL (if not already)
+1. System in MANUAL mode (el de arranque; la web no tiene selector de modo)
 2. ARM the system
-3. Press and hold "Forward" button
+3. Subir el slider de velocidad (por encima de ~140 para que arranque)
 4. Verify motor moves forward
-5. Release button (should trigger driveStop)
-6. Press and hold "Back" button
-7. Verify motor moves backward
-8. Release button
+5. Volver el slider a 0: el motor para
+6. Bajar el slider
+7. Verify motor moves backward (con 60 ms de tiempo muerto al invertir)
+8. Volver el slider a 0
 
 **Expected Result**:
-- Motor responds to forward/back commands
-- Motor stops when button released
+- Motor responds to the slider in both directions
+- Motor stops with the slider at 0
 - Reverse lights turn on when going backward
 
 ---
@@ -120,16 +133,16 @@ This guide helps you manually test the RC car system functionality when automate
 
 **Steps**:
 1. System in MANUAL mode and ARMED
-2. Press and hold "Left" button
+2. Girar el volante hacia la izquierda
 3. Verify steering turns left
-4. Release button (should center)
-5. Press and hold "Right" button
+4. Soltar el volante (vuelve al centro, 105)
+5. Girar el volante hacia la derecha
 6. Verify steering turns right
-7. Release button (should center)
+7. Soltar el volante
 
 **Expected Result**:
-- Steering responds to left/right commands
-- Steering centers when button released
+- Steering follows the wheel (50 izquierda, 105 centro, 160 derecha)
+- Steering centers when the wheel is released
 
 ---
 
@@ -139,12 +152,11 @@ This guide helps you manually test the RC car system functionality when automate
 
 **Steps**:
 1. System in MANUAL mode and ARMED
-2. Move speed slider to minimum (60)
-3. Press forward button
-4. Note motor speed
-5. Move speed slider to maximum (255)
-6. Press forward button again
-7. Note motor speed (should be faster)
+2. Move speed slider to ~150 hacia adelante
+3. Note motor speed
+4. Move speed slider to maximum (255)
+5. Note motor speed (should be faster)
+6. Probar por debajo de ~140 desde parado: el firmware acepta el valor pero el motor no arranca (fricción estática)
 
 **Expected Result**: Motor speed changes based on slider position
 
@@ -176,10 +188,11 @@ This guide helps you manually test the RC car system functionality when automate
 **Steps**:
 1. System in MANUAL mode and ARMED
 2. Motor running forward
-3. Click "BRAKE" button
-4. Verify motor stops immediately (< 1ms response)
+3. Click "E-STOP" button
+4. Verify motor stops (hasta ~50 ms, no < 1 ms) and the slider goes back to 0
 
-**Expected Result**: Motor stops instantly, no delay
+**Expected Result**: Motor stops (`EVENT:CMD_EXECUTED:EMERGENCY_BRAKE`) y queda bloqueado 5 s
+aunque se mueva el slider. El estado no cambia.
 
 ---
 
@@ -199,7 +212,8 @@ This guide helps you manually test the RC car system functionality when automate
 **Expected Result**: 
 - Motor stops immediately on E-STOP
 - State changes to FAULT
-- Serial shows: `[SupervisorTask] E-STOP triggered via GPIO!`
+- Serial shows: `EVENT:ESTOP_TRIGGERED:GPIO` y `[SupervisorTask] E-STOP triggered via GPIO!`
+- Al liberar: `EVENT:ESTOP_RELEASED`. El sistema **sigue** en FAULT hasta volver a armar
 
 ---
 
@@ -208,13 +222,16 @@ This guide helps you manually test the RC car system functionality when automate
 **Objective**: Verify MANUAL ↔ AUTO mode switching
 
 **Steps**:
-1. System in MANUAL mode
-2. Click "AUTO" button
-3. Verify status overlay shows "AUTO"
-4. Click "MANUAL" button
-5. Verify status overlay shows "MANUAL"
+La página web no tiene botones de modo; se cambia por serie (o con `http://192.168.4.1/mode?value=AUTO`).
 
-**Expected Result**: Mode switches correctly, status updates
+1. System in MANUAL mode
+2. Send `M:SYS_MODE:1`
+3. Verify status line shows "AUTO" (`EVENT:MODE_CHANGED:AUTO`)
+4. Send `M:SYS_MODE:0`
+5. Verify status line shows "MANUAL"
+
+**Expected Result**: Mode switches correctly, status updates. Mandar el modo que ya está solo
+produce `EVENT:CMD_RECEIVED:SYS_MODE:<modo>`.
 
 ---
 
@@ -222,19 +239,19 @@ This guide helps you manually test the RC car system functionality when automate
 
 **Objective**: Verify UART communication with Jetson
 
-**Prerequisites**: UART device connected to GPIO 9 (TX) and GPIO 10 (RX)
+**Prerequisites**: UART device connected to GPIO 17 (TX) and GPIO 16 (RX) at 921600, o por USB a 115200.
+Usar un script: en AUTO el watchdog salta a los 300 ms sin comandos.
 
 **Steps**:
-1. Set mode to AUTO
-2. ARM the system
-3. Send UART message: `M:SYS_ARM\n`
-4. Verify system ARMs
-5. Send: `C:SET_SPEED:128\n`
-6. Verify motor speed changes
-7. Send: `C:SET_STEER:90\n`
-8. Verify steering moves
-9. Send: `E:BRAKE_NOW\n`
-10. Verify emergency brake triggers
+1. Send `M:SYS_MODE:1\n` (AUTO), esperar ~100 ms
+2. Send UART message: `M:SYS_ARM:0\n`
+3. Verify system ARMs (y pasa a RUNNING)
+4. Send: `C:SET_SPEED:150\n`
+5. Verify motor speed changes y se mantiene (latching) mientras se manda `M:PING:0\n` cada 100 ms
+6. Send: `C:SET_STEER:90\n`
+7. Verify steering moves
+8. Send: `E:BRAKE_NOW:0\n`
+9. Verify emergency brake triggers
 
 **Expected Result**: All UART commands are parsed and executed correctly
 
@@ -247,16 +264,17 @@ This guide helps you manually test the RC car system functionality when automate
 **Steps**:
 1. Set mode to AUTO
 2. ARM the system
-3. Start sending heartbeat messages via UART (< 120ms interval)
+3. Start sending heartbeat messages via UART (`M:PING:0` every 100 ms)
 4. Stop sending messages
-5. Wait > 120ms
+5. Wait > 300 ms (en MANUAL, > 1000 ms)
 6. Verify system enters FAULT state
 7. Verify motor stops and steering centers
 
 **Expected Result**: 
 - System detects heartbeat timeout
 - Enters FAULT state
-- Serial shows: `[SupervisorTask] Watchdog timeout! Heartbeat age: XXX ms`
+- Serial shows: `EVENT:WATCHDOG_TIMEOUT` y `[SupervisorTask] Watchdog timeout! Heartbeat age: XXX ms`
+- No salta justo después de armar (era un watchdog falso, corregido en b4acb21)
 
 ---
 
@@ -267,7 +285,7 @@ This guide helps you manually test the RC car system functionality when automate
 **Steps**:
 1. Open browser
 2. Navigate to `http://192.168.4.1/status`
-3. Verify JSON response: `{"mode":"MANUAL","state":"DISARMED"}`
+3. Verify JSON response: `{"mode":"MANUAL","state":"RUNNING"}` con `-DBOOT_ARMED` (`"DISARMED"` sin él)
 4. Change mode and state
 5. Refresh status endpoint
 6. Verify JSON updates
@@ -306,14 +324,15 @@ This guide helps you manually test the RC car system functionality when automate
 - Try accessing `http://192.168.4.1` directly
 
 ### Motor not responding
-- Verify system is ARMED
-- Check mode is MANUAL
+- Verify system is ARMED/RUNNING and not in FAULT (watchdog, E-STOP, ultrasonido)
+- Check there is no 5 s cooldown after a brake
+- Speed above ~140
 - Verify GPIO connections (IN3, IN4, ENB)
 - Check serial monitor for error messages
 
 ### UART not working
-- Verify baud rate is 921600
-- Check GPIO 9 (TX) and GPIO 10 (RX) connections
+- Verify baud rate is 921600 (UART externo) / 115200 (USB)
+- Check GPIO 17 (TX) and GPIO 16 (RX) connections
 - Verify UART device is configured correctly
 - Check serial monitor for parsing errors
 
