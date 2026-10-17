@@ -208,3 +208,26 @@ La arquitectura actual (v2.0) proporciona una base sólida y estable. Sin embarg
 2.  **Eficiencia Energética:** La transición a un modelo *Event-Driven* permitiría que el procesador permanezca en estado *Idle* durante los periodos de inactividad, en lugar de despertar periódicamente.
 
 > **Nota:** Se ha redactado la propuesta **`docs/v3.0.0/REFACTOR_PROPOSAL.md`**, una versión que utilizara las notificaciones para reemplazar el polling
+
+---
+
+## Licencia
+
+Este proyecto se distribuye bajo la **Licencia MIT** — ver [LICENSE](LICENSE).
+
+Podés usar, modificar y redistribuir este firmware, incluso con fines comerciales,
+siempre que conserves el aviso de copyright. Se entrega sin garantías.
+
+### Dependencias y sus licencias
+
+El código de `src/` e `include/` es propio. Las dependencias externas conservan sus
+propias licencias:
+
+| Dependencia | Licencia | Alcance |
+|---|---|---|
+| [arduino-esp32](https://github.com/espressif/arduino-esp32) | LGPL-2.1 | Framework, se enlaza pero no se redistribuye acá |
+| [ESP32Servo](https://github.com/madhephaestus/ESP32Servo) | ver su repositorio | Librería de control de servo |
+
+> **Nota:** La LGPL impone obligaciones al distribuir **binarios** enlazados.
+> Este repositorio distribuye únicamente código fuente, por lo que no se ven
+> afectadas. Si publicás un `.bin` compilado, revisá los términos de la LGPL-2.1.
