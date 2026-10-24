@@ -38,15 +38,10 @@ void motor_set_requested_direction(bool forward)
 static bool motor_control_allowed(void)
 {
     system_state_t state = supervisor_get_state();
-    system_mode_t mode = supervisor_get_mode();
-
-    if (mode == MODE_AUTO)
-    {
-        // In AUTO mode, need to be RUNNING
-        return (state == STATE_RUNNING);
-    }
-    // In MANUAL mode, ARMED is enough
-    return (state == STATE_ARMED || state == STATE_RUNNING);
+    // STOPPED is an armed state: what holds the motor is the stop request, which
+    // clears a supervisor cycle before the state goes back to RUNNING.
+    return (state == STATE_ARMED || state == STATE_RUNNING || state == STATE_STOPPED) &&
+           !supervisor_stop_requested();
 }
 
 void motor_task(void *pvParameters)
@@ -65,6 +60,7 @@ void motor_task(void *pvParameters)
     bool in_cooldown = false;
     int32_t last_ignored_speed = -1; // Track last ignored speed command to avoid repeated logs
     int32_t last_reported_speed = -1; // Track last speed reported over the link to avoid repeated logs
+    bool stop_logged = false; // Log the ignored speed once per stop, not every cycle
 
     serial_line("[MotorTask] Motor task started");
 
@@ -129,8 +125,20 @@ void motor_task(void *pvParameters)
                 switch (cmd)
                 {
                 case CMD_SET_SPEED: {
+                    // STOPPED (obstacle or M:SYS_STOP): brake and hold, without
+                    // leaving the armed states. Checked here and not only in the
+                    // fail-safe branch below, so the PWM is never applied for one
+                    // cycle before that branch cuts it.
+                    if (supervisor_stop_requested()) {
+                        if (!stop_logged) {
+                            serial_line("[MotorTask] Speed command ignored (STOPPED)");
+                            stop_logged = true;
+                        }
+                        has_valid_command = false; // Treat as no command
+                        last_ignored_speed = -1;
+                    }
                     // Check system state before allowing speed commands
-                    if (!motor_control_allowed()) {
+                    else if (!motor_control_allowed()) {
                         // Only print if this is a different command than the last ignored one
                         if (last_ignored_speed != value) {
                             serial_line("[MotorTask] SET_SPEED ignored - system DISARMED");
@@ -241,6 +249,12 @@ void motor_task(void *pvParameters)
         // means brake. The whole loop is guarded by the system state, not only
         // the CMD_SET_SPEED branch, so DISARM/FAULT stop the vehicle for good
         // and an expired command never re-applies the last speed.
+        if (!supervisor_stop_requested())
+        {
+            stop_logged = false;
+        }
+
+        // motor_control_allowed() is false while STOPPED too.
         if (in_cooldown || !motor_control_allowed())
         {
             // Ensure motor stays stopped during cooldown / while not authorized
@@ -264,7 +278,7 @@ void motor_task(void *pvParameters)
             //   - Losing the link stops the M:PING:0 stream, the watchdog
             //     latches FAULT, motor_control_allowed() goes false, and the
             //     branch above brakes and clears current_speed.
-            //   - DISARM, E-STOP, ultrasonic and cooldown all land in that same
+            //   - DISARM, E-STOP, STOPPED and cooldown all land in that same
             //     branch, which zeroes current_speed - so there is nothing left
             //     to latch and the vehicle cannot restart on its own.
             // Without the watchdog covering BOTH modes and without FAULT being

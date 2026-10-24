@@ -80,7 +80,7 @@ void setup(void)
     serial_line("[main] Mailboxes initialized");
 
     // A-5: create the telemetry TX queue BEFORE any task exists, so no producer
-    // can find it NULL and drop the initial state/mode events.
+    // can find it NULL and drop the initial state event.
     if (!link_tx_init())
     {
         serial_line("EVENT:FATAL:TX_QUEUE_CREATE_FAILED");

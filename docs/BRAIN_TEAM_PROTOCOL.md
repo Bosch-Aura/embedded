@@ -8,8 +8,8 @@ Este documento describe cómo enviar comandos desde el sistema Brain (Jetson/PC)
 
 | Compilación | Estado al arrancar | Qué pasa |
 |---|---|---|
-| **Con `-DBOOT_ARMED`** (agregándolo a `build_flags`) | `ARMED`, modo `MANUAL` | En MANUAL pasa solo a `RUNNING` (`EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING`): el **primer** `C:SET_SPEED` que llegue se obedece, sin handshake. |
-| **Sin `-DBOOT_ARMED`** (es la que está hoy en `platformio.ini`) | `DISARMED`, modo `MANUAL` | Ningún comando de control se ejecuta hasta recibir `M:SYS_ARM:0`. Es la opción más segura (corrección C-3). |
+| **Con `-DBOOT_ARMED`** (agregándolo a `build_flags`) | `ARMED` | Pasa solo a `RUNNING` (`EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING`): el **primer** `C:SET_SPEED` que llegue se obedece, sin handshake. |
+| **Sin `-DBOOT_ARMED`** (es la que está hoy en `platformio.ini`) | `DISARMED` | Ningún comando de control se ejecuta hasta recibir `M:SYS_ARM:0`. Es la opción más segura (corrección C-3). |
 
 Con el `platformio.ini` actual la placa **arranca `DISARMED`**: el cliente tiene que mandar
 `M:SYS_ARM:0` para que obedezca. Igual, no dependas de la compilación: **mandá siempre
@@ -20,20 +20,23 @@ Con `-DBOOT_ARMED`, el watchdog recién empieza a contar con el **primer** coman
 que arranca armada y no recibe nada se queda en `RUNNING` sin entrar en `FAULT` (tampoco se mueve,
 porque no hay ninguna velocidad latcheada).
 
+**El ESP32 no tiene modos de manejo.** Si el auto se maneja solo o lo maneja una persona lo
+decide la Jetson; para la placa es lo mismo: obedece comandos mientras está armada y el enlace
+está vivo. `M:SYS_MODE` ya no existe (se descarta sin respuesta, como cualquier comando
+desconocido) y no se emite `EVENT:MODE_CHANGED`.
+
 **Secuencia de inicio recomendada:**
 1. Abrir el puerto y **esperar `EVENT:SYSTEM_READY`** (en la Jetson abrir el puerto reinicia la placa, ver §Conexión).
-2. Establecer modo: `M:SYS_MODE:1` (AUTO) o `M:SYS_MODE:0` (MANUAL). Esperar `EVENT:CMD_EXECUTED:SYS_MODE:<modo>`
-   (o, si ya estaba en ese modo, solo llega `EVENT:CMD_RECEIVED:SYS_MODE:<modo>`).
-3. Armar: `M:SYS_ARM:0`. Esperar `EVENT:CMD_EXECUTED:SYS_ARM`.
-4. Mantener vivo el enlace (`M:PING:0` o comandos de control) más seguido que el watchdog, ver §TTL y watchdog.
+2. Armar: `M:SYS_ARM:0`. Esperar `EVENT:CMD_EXECUTED:SYS_ARM`.
+3. Mantener vivo el enlace (`M:PING:0` o comandos de control) más seguido que el watchdog, ver §TTL y watchdog.
 
 No mandes dos comandos `M:` pegados: el supervisor tiene **un solo lugar** para comandos de gestión
 y lo revisa cada 20 ms, así que el segundo puede pisar al primero. Separalos al menos ~50 ms o,
 mejor, esperá el `EVENT:` de confirmación del anterior.
 
 **Cuándo se obedecen los comandos de control (SET_SPEED, SET_STEER):**
-- En modo **AUTO**: solo en estado `RUNNING`. Se pasa de `ARMED` a `RUNNING` solo, en cuanto hay un heartbeat reciente (< 300 ms); como `SYS_ARM` cuenta como heartbeat, normalmente ocurre al armar.
-- En modo **MANUAL**: en `ARMED` o `RUNNING` (y `ARMED` pasa solo a `RUNNING`).
+- En `ARMED` o `RUNNING` (y `ARMED` pasa solo a `RUNNING`).
+- En `STOPPED` se ignoran: velocidad 0 y servo quieto (ver §STOPPED).
 - En `DISARMED` o `FAULT` se ignoran **en silencio**: no hay `EVENT:` de rechazo, solo una línea de depuración `[MotorTask] SET_SPEED ignored - system DISARMED` / `[SteerTask] SET_STEER ignored ...`.
 
 ## Formato de Comandos
@@ -46,7 +49,7 @@ CHANNEL:COMMAND:VALUE\n
 
 - **CHANNEL**: Un solo carácter que identifica el canal
 - **COMMAND**: Nombre del comando (mayúsculas)
-- **VALUE**: Valor numérico entero (excepción: `M:SYS_MODE` acepta también `AUTO`/`MANUAL`)
+- **VALUE**: Valor numérico entero
 - **Terminación**: Cada comando debe terminar con `\n` (newline); `\r` también sirve como terminador
 
 `LinkRxTask` procesa **como máximo una línea cada 10 ms** (≈100 líneas/s): en cada vuelta lee una
@@ -87,11 +90,11 @@ Establece la velocidad del motor de tracción.
   que reenviar `SET_SPEED` a 10 Hz: ya no es así.)
 
   **Lo que protege ante la pérdida del enlace es el watchdog, no el TTL.** Si deja de llegar
-  *cualquier* comando válido durante más de 300 ms (AUTO) o 1000 ms (MANUAL), el sistema entra en
+  *cualquier* comando válido durante más de 300 ms, el sistema entra en
   `FAULT`, frena y borra la velocidad latcheada. Por eso, si mandás la velocidad una sola vez,
   tenés que mantener el enlace con `M:PING:0` (ver §TTL y watchdog).
 
-  La velocidad latcheada también se borra con `E:BRAKE_NOW`, `M:SYS_DISARM`, E-STOP y ultrasonido:
+  La velocidad latcheada también se borra con `E:BRAKE_NOW`, `M:SYS_DISARM`, E-STOP y obstáculo del ultrasonido:
   después de cualquiera de ellos el auto queda parado hasta recibir un `SET_SPEED` nuevo. Nunca
   vuelve a arrancar solo.
 
@@ -223,8 +226,7 @@ efecto es alimentar el watchdog.
 - **Ejemplo**: `M:PING:0`
 
 Es obligatorio con el firmware *latching*: como la velocidad se manda una sola vez
-y despues no hay mas trafico, sin este ping el watchdog engancha `FAULT` a los 300 ms
-en AUTO (1000 ms en MANUAL). Mandalo a **10 Hz** (ver §TTL).
+y despues no hay mas trafico, sin este ping el watchdog engancha `FAULT` a los 300 ms. Mandalo a **10 Hz** (ver §TTL).
 
 - **Respuesta**: ninguna. `PING` no produce ningun `EVENT:` (para confirmar que el enlace
   esta vivo del lado cliente, usa el `EVENT:CMD_RECEIVED:SET_SPEED:<v>` de cada `SET_SPEED`).
@@ -240,6 +242,26 @@ Arma el sistema. Con la compilación actual la placa arranca desarmada, así que
 - **Respuesta**: `EVENT:CMD_RECEIVED:SYS_ARM` y `EVENT:CMD_EXECUTED:SYS_ARM` (este último se emite siempre, incluso si ya estaba armado). Si hubo cambio de estado, además `EVENT:STATE_CHANGED:ARMED` (y en seguida `RUNNING`).
 - **Rechazo**: `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE` si el E-STOP físico sigue accionado
 
+#### `M:SYS_STOP:0`
+Deja el vehículo en **`STOPPED`**: velocidad 0 y servo congelado donde está (no se centra).
+Se manda **una sola vez**: queda enganchado.
+
+- **Lo único que lo suelta es `M:SYS_RESUME:0`.** `SET_SPEED`, `SET_STEER`, `SYS_ARM` y
+  `SYS_DISARM` no lo sueltan: si se desarma y se vuelve a armar, el sistema vuelve a `STOPPED`.
+  Solo un reinicio de la placa lo borra.
+- Sigue armado: no hay que rearmar y no hay bloqueo de 5 s. El watchdog sigue activo, así que hay
+  que mantener el enlace (`M:PING:0`).
+- **Respuesta**: `EVENT:CMD_RECEIVED:SYS_STOP`, `EVENT:CMD_EXECUTED:SYS_STOP` (solo si no estaba
+  enganchado) y `EVENT:STATE_CHANGED:STOPPED`.
+
+#### `M:SYS_RESUME:0`
+Suelta el `SYS_STOP`. Si no hay obstáculo, el sistema vuelve a `RUNNING`; si lo hay, sigue en
+`STOPPED` hasta que se despeje. Nada latcheado se retoma: el auto anda de nuevo con el próximo
+`C:SET_SPEED` (y la dirección con el próximo `C:SET_STEER`).
+
+- **Respuesta**: `EVENT:CMD_RECEIVED:SYS_RESUME`, `EVENT:CMD_EXECUTED:SYS_RESUME` (solo si estaba
+  enganchado) y `EVENT:STATE_CHANGED:RUNNING`.
+
 #### `M:SYS_DISARM:0`
 Desarma el sistema (modo seguro). Detiene el vehículo inmediatamente.
 
@@ -248,17 +270,6 @@ Desarma el sistema (modo seguro). Detiene el vehículo inmediatamente.
 - **Ejemplo**: `M:SYS_DISARM:0`
 - **Efecto**: freno de emergencia (con el mismo bloqueo de 5 s que `E:BRAKE_NOW`), borra la velocidad latcheada y centra la dirección
 - **Respuesta**: `EVENT:CMD_RECEIVED:SYS_DISARM`, `EVENT:CMD_EXECUTED:SYS_DISARM`, `EVENT:STATE_CHANGED:DISARMED`, `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` y, si la dirección no estaba centrada, `EVENT:CMD_EXECUTED:SET_STEER_CENTER`. Si ya estaba `DISARMED`, solo llega el `CMD_RECEIVED`.
-
-#### `M:SYS_MODE:<valor>`
-Establece el modo del sistema.
-
-- **Valor**: `0` / `MANUAL`, o `1` / `AUTO` (se aceptan las cuatro formas, comparadas como texto)
-- **TTL**: 5000 ms en el mailbox, se ejecuta una sola vez
-- **Ejemplo**: `M:SYS_MODE:1` (modo AUTO) o `M:SYS_MODE:AUTO`
-- **Respuesta**: `EVENT:CMD_RECEIVED:SYS_MODE:<AUTO|MANUAL>`, `EVENT:CMD_EXECUTED:SYS_MODE:<modo>` y `EVENT:MODE_CHANGED:<modo>`.
-  **Si el modo ya era ese**, el supervisor no hace nada y **solo** llega el `EVENT:CMD_RECEIVED:SYS_MODE:<modo>`: no esperes un `CMD_EXECUTED` que no va a venir.
-- **Valor desconocido**: se responde `EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE` y **no se cambia el modo**
-- **Nota**: al pasar a AUTO se reinicia el heartbeat: el watchdog deja de contar hasta el próximo comando válido y, si el sistema estaba en `ARMED`, pasa a `RUNNING` recién con ese comando.
 
 #### `M:LIGHTS_ON:0`, `M:LIGHTS_OFF:0`, `M:LIGHTS_AUTO:0`
 Luces delanteras: encendidas, apagadas o automáticas (según el LDR).
@@ -286,19 +297,15 @@ ser = serial.Serial(PORT, baudrate=115200, timeout=1)
 while b"EVENT:SYSTEM_READY" not in ser.readline():
     pass
 
-# 1. Establecer modo AUTO (opcional, pero recomendado)
-ser.write(b"M:SYS_MODE:1\n")  # 1 = AUTO, 0 = MANUAL
-time.sleep(0.1)               # no mandar dos M: pegados
-
-# 2. Armar sistema (obligatorio: la placa arranca desarmada)
+# 1. Armar sistema (obligatorio: la placa arranca desarmada)
 ser.write(b"M:SYS_ARM:0\n")
 time.sleep(0.1)
 
-# 3. Ahora los comandos de control funcionarán. Un solo SET_SPEED alcanza (latching)
+# 2. Ahora los comandos de control funcionarán. Un solo SET_SPEED alcanza (latching)
 ser.write(b"C:SET_SPEED:150\n")
 ser.write(b"C:SET_STEER:105\n")
 
-# 4. ...pero el enlace hay que mantenerlo vivo: sin tráfico, FAULT a los 300 ms en AUTO
+# 3. ...pero el enlace hay que mantenerlo vivo: sin tráfico, FAULT a los 300 ms
 for _ in range(20):           # ~2 s andando
     ser.write(b"M:PING:0\n")
     time.sleep(0.1)           # 10 Hz
@@ -317,9 +324,7 @@ ser = serial.Serial("/dev/ttyCH341USB0", baudrate=115200, timeout=1)  # /dev/tty
 while b"EVENT:SYSTEM_READY" not in ser.readline():  # abrir el puerto reinicia la placa
     pass
 
-# INICIALIZACIÓN: configurar modo y armar
-ser.write(b"M:SYS_MODE:1\n")  # Modo AUTO
-time.sleep(0.1)
+# INICIALIZACIÓN: armar
 ser.write(b"M:SYS_ARM:0\n")
 time.sleep(0.1)
 
@@ -383,26 +388,22 @@ Los comandos tienen un tiempo de vida limitado en su mailbox:
 
 Lo que detiene el vehículo si se cae el enlace es el **watchdog de enlace**, que lleva el sistema
 a `FAULT` (frena, centra la dirección y borra la velocidad latcheada) si deja de llegar
-cualquier comando válido:
-
-| Modo | Timeout del watchdog |
-|---|---|
-| AUTO | 300 ms |
-| MANUAL | 1000 ms |
+cualquier comando válido durante más de **300 ms** (`WATCHDOG_TIMEOUT_MS`). Es uno solo para
+cualquier cliente: el firmware no distingue si maneja el piloto automático o una persona.
 
 La jerarquía que el firmware garantiza es `período de emisión < TTL < watchdog`:
 
 ```
-período recomendado 100 ms (10 Hz)  <  TTL 200 ms  <  watchdog AUTO 300 ms
+período recomendado 100 ms (10 Hz)  <  TTL 200 ms  <  watchdog 300 ms
 ```
 
 **Recomendación**: mandá **algún comando válido a 10-20 Hz**. Puede ser `M:PING:0` (si la
 velocidad se manda solo cuando cambia) o los propios `SET_SPEED`/`SET_STEER`.
-**Mínimo: 10 Hz.** (El watchdog de AUTO es de 300 ms; a 5 Hz el hueco entre comandos es de
+**Mínimo: 10 Hz.** (El watchdog es de 300 ms; a 5 Hz el hueco entre comandos es de
 200 ms y cualquier demora del lado del cliente lo hace saltar.)
 
 Solo un comando **reconocido y despachado** refresca el watchdog: `E:BRAKE_NOW`/`E:STOP`, `C:SET_SPEED`,
-`C:SET_STEER`, `C:SET_DIR`, `M:PING`, `M:SYS_ARM`, `M:SYS_DISARM`, `M:SYS_MODE` (con valor válido) y
+`C:SET_STEER`, `C:SET_DIR`, `M:PING`, `M:SYS_ARM`, `M:SYS_DISARM` y
 `M:LIGHTS_*`. Basura que casualmente se parsee no lo mantiene vivo.
 
 > **Watchdog falso al armar (corregido en b4acb21).** Firmwares anteriores a ese commit podían
@@ -429,30 +430,30 @@ y no debe parsearse):
 | Evento | Cuándo |
 |---|---|
 | `EVENT:SYSTEM_READY` | Fin de `setup()`, todas las tareas creadas |
-| `EVENT:STATE_CHANGED:<DISARMED\|ARMED\|RUNNING\|FAULT>` | Cambio de estado. Al arrancar se informa el estado inicial (puede llegar dos veces y antes o después de `SYSTEM_READY`) |
-| `EVENT:MODE_CHANGED:<AUTO\|MANUAL>` | Cambio de modo. Al arrancar, igual que el anterior |
+| `EVENT:STATE_CHANGED:<DISARMED\|ARMED\|RUNNING\|STOPPED\|FAULT>` | Cambio de estado. Al arrancar se informa el estado inicial (puede llegar dos veces y antes o después de `SYSTEM_READY`) |
 | `EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING` | Transición automática |
+| `EVENT:STATE_AUTO_TRANSITION:RUNNING->STOPPED:<SYS_STOP\|OBSTACLE>` | Entra en `STOPPED`, con la causa |
+| `EVENT:STATE_AUTO_TRANSITION:STOPPED->RUNNING` | Ya no hay `SYS_STOP` ni obstáculo |
+| `EVENT:CMD_RECEIVED:<SYS_STOP\|SYS_RESUME>` / `EVENT:CMD_EXECUTED:<SYS_STOP\|SYS_RESUME>` | Comando de stop recibido / el enganche cambió |
 | `EVENT:CMD_RECEIVED:SET_SPEED:<v>` | Cada `C:SET_SPEED` recibido (valor tal como llegó), aunque después se ignore |
 | `EVENT:CMD_RECEIVED:SET_STEER:<v>` | Cada `C:SET_STEER` recibido |
 | `EVENT:CMD_RECEIVED:SET_DIR:<FORWARD\|BACKWARD>` | Cada `C:SET_DIR` recibido |
 | `EVENT:CMD_RECEIVED:BRAKE_NOW` | `E:BRAKE_NOW` o `E:STOP` recibido |
 | `EVENT:CMD_RECEIVED:<SYS_ARM\|SYS_DISARM>` | Comando de armado recibido |
-| `EVENT:CMD_RECEIVED:SYS_MODE:<AUTO\|MANUAL>` | `M:SYS_MODE` con valor válido (se emite aunque el modo no cambie) |
 | `EVENT:CMD_RECEIVED:<LIGHTS_ON\|LIGHTS_OFF\|LIGHTS_AUTO>` | Comando de luces recibido |
 | `EVENT:CMD_EXECUTED:SET_SPEED:<v>` | La velocidad aplicada cambió (valor ya saturado a 0-255) |
 | `EVENT:CMD_EXECUTED:SET_STEER:<v>` | El ángulo aplicado cambió (valor ya saturado a 50-160) |
 | `EVENT:CMD_EXECUTED:SET_STEER_CENTER` | Dirección centrada por `SYS_DISARM`, watchdog o E-STOP |
-| `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` | Se aplicó un freno de emergencia, venga de donde venga: `E:BRAKE_NOW`/`E:STOP`, `SYS_DISARM`, watchdog, E-STOP físico o ultrasonido. Arranca el bloqueo de 5 s |
+| `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` | Se aplicó un freno de emergencia, venga de donde venga: `E:BRAKE_NOW`/`E:STOP`, `SYS_DISARM`, watchdog o E-STOP físico. Arranca el bloqueo de 5 s. (El ultrasonido **no** lo emite: ver `OBSTACLE_DETECTED`) |
 | `EVENT:CMD_EXECUTED:BRAKE_NOW` | Ya no se emite: solo lo provocaba la página web (`/driveStop`), que se eliminó |
 | `EVENT:CMD_EXECUTED:<SYS_ARM\|SYS_DISARM>` | Comando de armado aplicado (`SYS_ARM` se confirma siempre) |
-| `EVENT:CMD_EXECUTED:SYS_MODE:<AUTO\|MANUAL>` | El modo cambió (no se emite si ya estaba en ese modo) |
 | `EVENT:CMD_EXECUTED:<LIGHTS_ON\|LIGHTS_OFF\|LIGHTS_AUTO>` | El modo de luces cambió |
 | `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE` | ARM con E-STOP accionado |
-| `EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE` | Valor de modo no reconocido |
 | `EVENT:ESTOP_TRIGGERED:GPIO` | E-STOP físico accionado |
 | `EVENT:ESTOP_RELEASED` | E-STOP físico liberado |
 | `EVENT:WATCHDOG_TIMEOUT` | Pérdida de enlace |
-| `EVENT:FAULT_TRIGGERED:<motivo>` | Otra tarea forzó `FAULT`. Hoy el único motivo es `ULTRASONIC_OBSTACLE` (obstáculo a < 30 cm en 3 lecturas seguidas, ~150 ms) |
+| `EVENT:OBSTACLE_DETECTED:<cm>` | Obstáculo a < 30 cm en 3 lecturas válidas (las lecturas sin eco no cortan la cuenta; ~0,2-1 s). El sistema pasa a `STOPPED` (frena, servo quieto); no hay `FAULT` ni bloqueo de 5 s |
+| `EVENT:OBSTACLE_CLEARED` | 3 lecturas a ≥ 35 cm, o 10 seguidas sin eco (~0,8 s). Vuelve a `RUNNING` si no hay `SYS_STOP`; el auto sigue parado hasta un `C:SET_SPEED` nuevo |
 | `EVENT:FATAL:TASK_CREATE_FAILED:<tarea>` | Fallo de arranque; el equipo reinicia |
 | `EVENT:FATAL:MAILBOX_INIT_FAILED` | Fallo de arranque; el equipo reinicia |
 | `EVENT:FATAL:TX_QUEUE_CREATE_FAILED` | Fallo de arranque; el equipo reinicia |
@@ -461,7 +462,7 @@ y no debe parsearse):
 bloqueo de 5 s) tampoco: solo dejan una línea de depuración.
 
 **Por dónde sale cada cosa.** Todos los eventos salen por el **USB** (115200). Por el **UART
-externo** (GPIO 17/16, 921600) solo salen `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`: un cliente
+externo** (GPIO 17/16, 921600) solo sale `EVENT:STATE_CHANGED`: un cliente
 conectado por el UART externo no ve los `CMD_RECEIVED`/`CMD_EXECUTED` ni los avisos de seguridad.
 
 **Cada línea llega entera.** Toda la salida por USB pasa por `serial_line()`/`serial_linef()`
@@ -477,15 +478,14 @@ parten.
 
 ### Recuperación de FAULT
 
-Se entra en `STATE_FAULT` por **watchdog** (pérdida de enlace, `EVENT:WATCHDOG_TIMEOUT`), por
-**E-STOP físico** (`EVENT:ESTOP_TRIGGERED:GPIO`) o por el **ultrasonido** (obstáculo a menos de
-30 cm durante 3 lecturas seguidas, `EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`). En los tres casos
-se frena y se borra la velocidad latcheada; watchdog y E-STOP además centran la dirección.
+Se entra en `STATE_FAULT` por **watchdog** (pérdida de enlace, `EVENT:WATCHDOG_TIMEOUT`) o por
+**E-STOP físico** (`EVENT:ESTOP_TRIGGERED:GPIO`). En los dos casos se frena, se borra la velocidad
+latcheada y se centra la dirección. Un obstáculo del ultrasonido **no** es `FAULT` (ver
+§Obstáculos).
 FAULT bloquea todos los comandos de control y **no se borra solo**. Para recuperarse:
 
 1. **Eliminar la causa.** Si fue el E-STOP, liberarlo (llega `EVENT:ESTOP_RELEASED`).
-   Si fue el watchdog, restablecer el enlace. Si fue el ultrasonido, sacar el obstáculo: el
-   firmware no lo comprueba al rearmar, así que si sigue ahí vuelve a `FAULT` a los ~150 ms.
+   Si fue el watchdog, restablecer el enlace.
 2. Enviar `M:SYS_ARM:0`.
    - Si el E-STOP sigue accionado se responde `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE`
      y el sistema **permanece** en FAULT.
@@ -500,9 +500,40 @@ tras un FAULT (ver §Clientes conocidos).
 conservadora. Tras un frenado de emergencia hay un **bloqueo de 5 s** durante el cual
 el motor no responde aunque el sistema esté armado.
 
-El ultrasonido **funciona** y está siempre activo, en cualquier estado. (Durante un tiempo se creyó
-que estaba muerto; en realidad había un obstáculo real a 22 cm delante del sensor.) Tenelo en
-cuenta en el banco: una pared, una caja o una mano a menos de 30 cm lleva el auto a `FAULT`.
+### STOPPED
+
+`STOPPED` es un estado **armado pero quieto**: velocidad 0, el servo congelado donde estaba (no se
+centra) y `C:SET_SPEED` / `C:SET_STEER` ignorados. No es una falla: no hay bloqueo de 5 s y no
+hay que rearmar. Se entra por cualquiera de estas dos causas y se vuelve solo a `RUNNING` cuando
+no queda ninguna:
+
+- **`M:SYS_STOP:0`**, enganchado hasta `M:SYS_RESUME:0` (ver §Comandos).
+- **Un obstáculo del ultrasonido**, mientras esté ahí (ver §Obstáculos).
+
+El watchdog sigue activo en `STOPPED`: si se corta el enlace, pasa a `FAULT`.
+
+### Obstáculos
+
+El ultrasonido está siempre activo. Con 3 lecturas válidas a menos de 30 cm
+llega `EVENT:OBSTACLE_DETECTED:<cm>` y el sistema pasa a **`STOPPED`** mientras el obstáculo
+siga ahí. **No desarma ni pasa a `FAULT`**.
+
+**Lecturas sin eco.** El sensor devuelve 0 tanto con el camino libre (nada en ~4 m) como con un
+objeto muy cerca: con un obstáculo real a 6 cm leía 6 una vez cada cuatro y 0 el resto. Por eso
+un 0 suelto no cuenta ni como obstáculo ni como libre; antes reiniciaba la cuenta y el auto **no
+frenaba** con ese obstáculo.
+
+Cuando hay 3 lecturas a 35 cm o más, o 10 seguidas sin eco (~0,8 s), llega `EVENT:OBSTACLE_CLEARED`
+y, si no hay un `SYS_STOP` enganchado, el sistema vuelve a `RUNNING`. Durante el
+frenado se borró la velocidad latcheada, así que **el auto no arranca solo**: vuelve a andar con el
+próximo `C:SET_SPEED`. Un cliente que manda la velocidad en cada ciclo (como `bfmc_hardware_bridge`)
+sigue enseguida; uno que la manda una sola vez (latching) tiene que volver a mandarla. Seguir o no
+es una decisión de la Jetson.
+
+Antes un obstáculo llevaba a `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`): el auto quedaba
+parado hasta que alguien lo rearmara a mano, y ese evento ya no existe.
+
+Tenelo en cuenta en el banco: una pared, una caja o una mano a menos de 30 cm frena el auto.
 
 ### Conexión y puerto serie
 - **USB**: 115200 baud. Es por donde salen todos los eventos.
@@ -511,7 +542,7 @@ cuenta en el banco: una pared, una caja o una mano a menos de 30 cm lleva el aut
   adaptarlos.
 - **Abrir el puerto reinicia la placa** (llega de nuevo `EVENT:SYSTEM_READY`), aunque DTR/RTS
   queden en reposo. Hay que esperar ese evento antes de mandar comandos, y asumir que cada
-  reconexión parte de cero: estado inicial, modo MANUAL y nada latcheado.
+  reconexión parte de cero: estado inicial y nada latcheado.
 
 ### Respuestas del ESP32
 El ESP32 puede enviar mensajes de debug por serial. Puedes leerlos para debugging:
@@ -534,7 +565,7 @@ if ser.in_waiting > 0:
 ## Checklist de Integración
 
 - [ ] Configurar conexión serial (USB o UART externo) y esperar `EVENT:SYSTEM_READY` al abrir el puerto
-- [ ] Mandar `M:SYS_MODE` y `M:SYS_ARM:0` al conectar, esperando la confirmación de cada uno
+- [ ] Mandar `M:SYS_ARM:0` al conectar y esperar `EVENT:CMD_EXECUTED:SYS_ARM`
 - [ ] Implementar función de conversión grados → servo
 - [ ] Alimentar el watchdog: algún comando válido a 10-20 Hz (`M:PING:0` o los de control)
 - [ ] Manejar freno de emergencia en caso de detección de obstáculos
@@ -557,14 +588,14 @@ Luego prueba comandos como:
 - `E:BRAKE_NOW:0`
 
 Ojo: el simulador **no manda `M:PING:0`** por su cuenta. Escribiendo a mano es difícil mandar algo
-cada menos de 1 s, así que después del primer comando el watchdog de MANUAL (1000 ms) suele llevar
+cada menos de 1 s, así que después del primer comando el watchdog (300 ms) lleva
 el sistema a `FAULT` enseguida. Para probar con el auto andando, usá un script que mande PING a 10 Hz.
 
 ## Clientes conocidos
 
 - **Brain-Aura** (`src/movement/esp32.py`): se apoya en el *latching* y mantiene el enlace con `M:PING:0` a 10 Hz.
 - **`bfmc_hardware_bridge`** (nodo ROS2 del repo `Bosch-Aura/autonomous-vehicle-BFMC-ros2`): al abrir
-  el puerto configura modo AUTO y arma; después manda `SET_STEER` + `SET_SPEED` a 20 Hz. Nunca rearma
+  el puerto, y después de cada reinicio de la placa, arma solo (sin mandar ningún modo); después manda `SET_STEER` + `SET_SPEED` a 20 Hz. Nunca rearma
   solo tras un `FAULT`.
 
 ## Soporte

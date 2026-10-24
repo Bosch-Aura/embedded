@@ -42,7 +42,7 @@ más simple. El adaptador solo hace falta para probar el UART externo:
 **Note:** ESP32 has TWO serial ports:
 - **USB Serial** (115200): programación, depuración **y** comandos. Por acá salen todos los `EVENT:`.
 - **UART1** (921600, para la Jetson por cable): GPIO 17 (TX), GPIO 16 (RX). Por acá solo vuelven
-  `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`. (Antes estaba en GPIO 9/10, que son del flash SPI.)
+  `EVENT:STATE_CHANGED`. (Antes estaba en GPIO 9/10, que son del flash SPI.)
 
 ### Step 4: Run the Simulator
 
@@ -66,7 +66,6 @@ Once in interactive mode, type commands:
 
 ```
 arm              # M:SYS_ARM:0
-mode auto        # M:SYS_MODE:1  (mode manual -> M:SYS_MODE:0)
 speed 150        # C:SET_SPEED:150 (latching; por debajo de ~140 el motor no arranca)
 steer 90         # C:SET_STEER:90 (50 izquierda, 105 centro, 160 derecha)
 emergency        # E:BRAKE_NOW:0
@@ -76,7 +75,7 @@ M:PING:0         # cualquier línea con ':' se manda tal cual
 quit             # Exit
 ```
 
-**Watchdog:** el simulador **no** manda latidos. Si pasa más de 1 s (MANUAL) o 300 ms (AUTO) sin
+**Watchdog:** el simulador **no** manda latidos. Si pasan más de 300 ms sin
 ningún comando válido, el sistema entra en `FAULT`, frena y hay que volver a armar. Escribiendo a
 mano eso pasa casi siempre; para probar con el auto andando, mandá `M:PING:0` desde un script.
 
@@ -93,7 +92,6 @@ screen /dev/ttyUSB1 921600      # por un adaptador en el UART externo
 Then type commands manually:
 ```
 M:SYS_ARM:0
-M:SYS_MODE:1
 C:SET_SPEED:150
 C:SET_STEER:90
 E:BRAKE_NOW:0
@@ -133,9 +131,6 @@ ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)  # /dev/ttyCH341USB0 en l
 while b'EVENT:SYSTEM_READY' not in ser.readline():   # abrir el puerto reinicia la placa
     pass
 
-# Switch to AUTO
-ser.write(b'M:SYS_MODE:1\n')
-time.sleep(0.1)          # no mandar dos M: pegados
 
 # ARM system
 ser.write(b'M:SYS_ARM:0\n')
@@ -147,7 +142,7 @@ ser.write(b'C:SET_SPEED:150\n')
 # Set steering
 ser.write(b'C:SET_STEER:90\n')
 
-# Mantener vivo el enlace 2 s (AUTO: FAULT a los 300 ms sin comandos)
+# Mantener vivo el enlace 2 s (FAULT a los 300 ms sin comandos)
 for _ in range(20):
     ser.write(b'M:PING:0\n')
     time.sleep(0.1)
@@ -173,7 +168,7 @@ Run: `python3 test_uart_simple.py`
 python3 test/python/test_uart_simulator.py /dev/ttyUSB0
 ```
 
-In simulator (en MANUAL, que es el modo de arranque):
+In simulator:
 ```
 > arm
 > speed 150
@@ -187,15 +182,15 @@ EVENT:CMD_RECEIVED:SET_SPEED:150
 EVENT:CMD_EXECUTED:SET_SPEED:150
 ```
 Si ya estaba armado (por ejemplo, compilado con `-DBOOT_ARMED`), igual llega `CMD_EXECUTED:SYS_ARM`. Si entre
-`arm` y `speed` pasó más de 1 s, antes llega `EVENT:WATCHDOG_TIMEOUT` y la velocidad se ignora
-(ver Scenario 2). En AUTO el margen es de 300 ms: a mano no da, hace falta un script.
+`arm` y `speed` pasaron más de 300 ms, antes llega `EVENT:WATCHDOG_TIMEOUT` y la velocidad se ignora
+(ver Scenario 2). A mano es difícil: para manejar hace falta un script.
 
 ### Scenario 2: Heartbeat Test
 
 El simulador **no** manda latidos solo, así que alcanza con dejar de escribir:
 
 1. Armar y mandar un comando (`arm`, `speed 150`)
-2. No mandar nada durante más de 1 s (MANUAL) o 300 ms (AUTO)
+2. No mandar nada durante más de 300 ms
 3. Apretar Enter en una línea vacía para ver lo que llegó
 
 **Expected:**
@@ -263,8 +258,8 @@ Another program is using the port. Close other serial terminals or IDE serial mo
 1. **Check connections:** TX→RX, RX→TX (crossed!)
 2. **Check baud rate:** 115200 por USB, 921600 por el UART externo
 3. **Check ESP32 is running:** Look for serial debug output
-4. **Check UART pins:** GPIO 17 (TX) / 16 (RX). Por el UART externo solo vuelven `STATE_CHANGED`/`MODE_CHANGED`
-5. **Check state:** si los comandos de control no hacen nada, mirá si el sistema está en `FAULT` (watchdog o ultrasonido: cualquier objeto a < 30 cm del sensor lo dispara)
+4. **Check UART pins:** GPIO 17 (TX) / 16 (RX). Por el UART externo solo vuelve `STATE_CHANGED`
+5. **Check state:** si los comandos de control no hacen nada, mirá si el sistema está en `FAULT` (watchdog) o si hay un obstáculo a < 30 cm del ultrasonido (`EVENT:OBSTACLE_DETECTED`: frena sin cambiar el estado)
 
 ### Wrong port
 
@@ -291,8 +286,6 @@ ls /dev/tty.usbserial* /dev/cu.usbserial*
 |---------|--------|---------|
 | ARM | `M:SYS_ARM:0` | `arm` |
 | DISARM | `M:SYS_DISARM:0` | `disarm` |
-| AUTO mode | `M:SYS_MODE:1` | `mode auto` |
-| MANUAL mode | `M:SYS_MODE:0` | `mode manual` |
 | Set speed | `C:SET_SPEED:VALUE` | `speed 150` |
 | Set steering | `C:SET_STEER:ANGLE` (50-160) | `steer 90` |
 | Set direction | `C:SET_DIR:0\|1` | `C:SET_DIR:0` |
@@ -309,9 +302,6 @@ $ python3 test/python/test_uart_simulator.py /dev/ttyUSB0
 
 > arm
 -> M:SYS_ARM:0
-
-> mode auto
--> M:SYS_MODE:1
 
 > speed 150
 -> C:SET_SPEED:150
@@ -333,6 +323,5 @@ $ python3 test/python/test_uart_simulator.py /dev/ttyUSB0
 1. **Use two terminals** solo si el simulador va por el UART externo: por USB, el simulador ya muestra la salida y el monitor no puede abrir el mismo puerto
 2. **Start slow:** Test one command at a time
 3. **Watch serial monitor:** See how ESP32 parses commands
-4. **Heartbeat:** el simulador **no** lo manda solo; sin comandos válidos durante 1 s (MANUAL) / 300 ms (AUTO) el sistema entra en `FAULT`
-5. **Test mode switching:** Try MANUAL ↔ AUTO switching
+4. **Heartbeat:** el simulador **no** lo manda solo; sin comandos válidos durante 300 ms el sistema entra en `FAULT`
 

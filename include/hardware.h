@@ -125,22 +125,23 @@ extern "C"
 #ifndef CONTROL_CMD_TTL_MS
 #define CONTROL_CMD_TTL_MS (LINK_EXPECTED_PERIOD_MS * 2) // 200 ms
 #endif
-#ifndef WATCHDOG_TIMEOUT_AUTO_MS
-#define WATCHDOG_TIMEOUT_AUTO_MS (LINK_EXPECTED_PERIOD_MS * 3) // 300 ms, always > TTL
+// The firmware has no driving modes (autonomous / manual is the Jetson's
+// business), so there is a single watchdog for every client.
+// hardware.env still names it after the old AUTO mode: take that value until
+// it is renamed there.
+#if !defined(WATCHDOG_TIMEOUT_MS) && defined(WATCHDOG_TIMEOUT_AUTO_MS)
+#define WATCHDOG_TIMEOUT_MS WATCHDOG_TIMEOUT_AUTO_MS
 #endif
-#ifndef WATCHDOG_TIMEOUT_MANUAL_MS
-#define WATCHDOG_TIMEOUT_MANUAL_MS 1000 // looser: a human operator is in the loop
+#ifndef WATCHDOG_TIMEOUT_MS
+#define WATCHDOG_TIMEOUT_MS (LINK_EXPECTED_PERIOD_MS * 3) // 300 ms, always > TTL
 #endif
 
 // La jerarquia de arriba deja de ser un comentario y pasa a comprobarse.
 // Si hardware.env pone un watchdog por debajo del TTL, el enlace entra en
 // FAULT en cada ciclo y el auto no se mueve: mejor no compilar que salir a
 // buscar eso con el auto en el piso.
-#if WATCHDOG_TIMEOUT_AUTO_MS <= CONTROL_CMD_TTL_MS
-#error "WATCHDOG_TIMEOUT_AUTO_MS debe ser > CONTROL_CMD_TTL_MS (revisa BRAIN_WATCHDOG_AUTO_MS en hardware.env)"
-#endif
-#if WATCHDOG_TIMEOUT_MANUAL_MS <= CONTROL_CMD_TTL_MS
-#error "WATCHDOG_TIMEOUT_MANUAL_MS debe ser > CONTROL_CMD_TTL_MS (revisa BRAIN_WATCHDOG_MANUAL_MS en hardware.env)"
+#if WATCHDOG_TIMEOUT_MS <= CONTROL_CMD_TTL_MS
+#error "WATCHDOG_TIMEOUT_MS debe ser > CONTROL_CMD_TTL_MS (revisa el watchdog en hardware.env)"
 #endif
 
 // Los topes del servo tienen que ser coherentes o la direccion queda invertida
