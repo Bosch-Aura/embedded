@@ -12,7 +12,7 @@ This guide explains how to test the UART communication without a Jetson board.
 > - **Watchdog**: 300 ms. Sin ningún comando válido en
 >   ese tiempo, `FAULT` + freno. `M:PING:0` lo alimenta sin hacer nada más.
 > - **Arranque**: arranca `DISARMED` (así está hoy `platformio.ini`); con `-DBOOT_ARMED`, `ARMED`.
-> - **Ultrasonido activo**: un objeto a menos de 30 cm lleva el sistema a `FAULT`.
+> - **Ultrasonido activo**: un objeto a menos de 30 cm frena el motor mientras esté ahí (`EVENT:OBSTACLE_DETECTED`), sin pasar a `FAULT`.
 
 ## Methods
 
@@ -225,7 +225,7 @@ sigue parado hasta un `C:SET_SPEED` nuevo. El estado no cambia.
 
 ### Motor Not Responding
 
-- **Check state:** hace falta `ARMED` o `RUNNING`. En `FAULT` (watchdog, E-STOP o un obstáculo a < 30 cm del ultrasonido) hay que volver a armar
+- **Check state:** hace falta `ARMED` o `RUNNING`. En `FAULT` (watchdog o E-STOP) hay que volver a armar. Un obstáculo a < 30 cm del ultrasonido frena sin cambiar el estado
 - **Check cooldown:** tras un freno de emergencia, 5 s de bloqueo (`[MotorTask] Speed command ignored (in cooldown)`)
 - **Check speed:** por debajo de ~140 el motor no arranca desde parado
 - **Check mailbox:** Look for `[MotorTask]` logs in serial monitor

@@ -259,7 +259,7 @@ Another program is using the port. Close other serial terminals or IDE serial mo
 2. **Check baud rate:** 115200 por USB, 921600 por el UART externo
 3. **Check ESP32 is running:** Look for serial debug output
 4. **Check UART pins:** GPIO 17 (TX) / 16 (RX). Por el UART externo solo vuelve `STATE_CHANGED`
-5. **Check state:** si los comandos de control no hacen nada, mirá si el sistema está en `FAULT` (watchdog o ultrasonido: cualquier objeto a < 30 cm del sensor lo dispara)
+5. **Check state:** si los comandos de control no hacen nada, mirá si el sistema está en `FAULT` (watchdog) o si hay un obstáculo a < 30 cm del ultrasonido (`EVENT:OBSTACLE_DETECTED`: frena sin cambiar el estado)
 
 ### Wrong port
 

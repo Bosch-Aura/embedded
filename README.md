@@ -39,7 +39,7 @@ Para garantizar la seguridad crítica, el sistema implementa un canal de comunic
     3.  **Prioridad de Ejecución:** La lógica de emergencia se evalúa antes que cualquier comando de movimiento estándar. **Latencia real: hasta ~50 ms en el peor caso** (polling de `LinkRxTask` 10 ms + ciclo de `MotorTask` 10 ms + bloqueo de `pulseIn()` del ultrasonido hasta 30 ms). La notificación no interrumpe el `vTaskDelay()` del lazo: ver hallazgos A-1 y A-2 de `docs/PLAN_MEJORAS.md`.
 
 * **Fuentes de Disparo:**
-    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas; además lleva el sistema a `FAULT`).
+    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas). **No** usa este camino ni pasa a `FAULT`: frena y mantiene frenado mientras haya obstáculo (`motor_set_obstacle_hold()`), sin cambiar el estado. Ver §3.2.
     * **Comandos Externos:** Solicitud de parada inmediata vía serie (`E:BRAKE_NOW` / `E:STOP`).
     * **Sistema:** Fallos de estado detectados por el Supervisor.
 
@@ -90,7 +90,7 @@ El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gesti
     * **Watchdog/Heartbeat:** verifica recepción constante de datos (300 ms, uno solo para cualquier cliente: el firmware no tiene modos de manejo, eso lo decide la Jetson). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
     * **E-STOP Hardware:** Monitoreo directo de pin GPIO para parada de emergencia física.
     * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING`.
-    * **`FAULT` desde otras tareas:** `supervisor_trigger_fault()` permite a `UltrasonicTask` dejar el sistema en `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`). `FAULT` nunca se borra solo: hace falta `M:SYS_ARM:0`.
+    * **Obstáculos no son `FAULT`:** `UltrasonicTask` frena y mantiene frenado mientras el obstáculo siga (`EVENT:OBSTACLE_DETECTED:<cm>` / `EVENT:OBSTACLE_CLEARED`), sin desarmar ni pasar a `FAULT`. Al frenar se borra la velocidad latcheada: el auto vuelve a andar solo con un `C:SET_SPEED` nuevo, y eso lo decide la Jetson. `FAULT` (watchdog o E-STOP) nunca se borra solo: hace falta `M:SYS_ARM:0`.
 
 ---
 
@@ -123,14 +123,22 @@ sequenceDiagram
 
     %% CASO 2: EMERGENCIA (FAST PATH)
     Note over Consumer: Estado: BLOCKED (Delay 10ms)
-    Safety->>Safety: Obstáculo Detectado!
+    Producer->>Producer: E:BRAKE_NOW recibido
     
     rect rgb(60, 20, 20)
-        note right of Safety: Fast Path (~50ms peor caso, ver A-1)
-        Safety->>Consumer: xTaskNotify(EMERGENCY)
+        note right of Producer: Fast Path (~50ms peor caso, ver A-1)
+        Producer->>Consumer: xTaskNotify(EMERGENCY)
         Note over Consumer: DESPIERTA INMEDIATAMENTE
         Consumer->>Consumer: STOP MOTOR
     end
+
+    %% CASO 3: OBSTÁCULO (HOLD, SIN FAULT)
+    Safety->>Safety: Obstáculo < 30 cm (3 lecturas)
+    Safety->>Consumer: motor_set_obstacle_hold(true)
+    Note over Consumer: Frena cada ciclo e ignora SET_SPEED, el estado no cambia
+    Safety->>Safety: Despejado: 3 lecturas >= 35 cm o 10 seguidas sin eco
+    Safety->>Consumer: motor_set_obstacle_hold(false)
+    Note over Consumer: Parado hasta un SET_SPEED nuevo
 ```
 
 ### 4.2 Diagrama de Despliegue

@@ -15,7 +15,7 @@ This guide helps you manually test the RC car system functionality when automate
 - Para las pruebas con movimiento, un script que mande comandos (por ejemplo `test/python/test_uart_simulator.py`):
   escribiendo a mano no se llega a alimentar el watchdog (300 ms)
 - Optional: UART device (Jetson or serial terminal) on GPIO 17/16. Los comandos también se pueden mandar por el mismo USB.
-- Ningún objeto a menos de 30 cm delante del ultrasonido: si no, el sistema entra en `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`)
+- Ningún objeto a menos de 30 cm delante del ultrasonido: si no, el motor queda frenado (`EVENT:OBSTACLE_DETECTED`)
 
 ## Test Procedures
 
@@ -225,7 +225,7 @@ Usar un script: el watchdog salta a los 300 ms sin comandos.
 ## Troubleshooting
 
 ### Motor not responding
-- Verify system is ARMED/RUNNING and not in FAULT (watchdog, E-STOP, ultrasonido)
+- Verify system is ARMED/RUNNING and not in FAULT (watchdog, E-STOP) and there is no obstacle ahead (`EVENT:OBSTACLE_DETECTED`)
 - Check there is no 5 s cooldown after a brake
 - Speed above ~140
 - Verify GPIO connections (IN3, IN4, ENB)

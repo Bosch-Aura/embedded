@@ -24,12 +24,20 @@
 // motor_set_requested_direction().
 static volatile bool requested_direction = true; // true = forward
 
+// Written by UltrasonicTask (core 0, priority 5), read every MotorTask cycle.
+static volatile bool obstacle_hold = false;
+
 static mailbox_t *motor_mailbox = NULL;
 static TaskHandle_t motor_task_handle = NULL;
 
 void motor_set_requested_direction(bool forward)
 {
     requested_direction = forward;
+}
+
+void motor_set_obstacle_hold(bool hold)
+{
+    obstacle_hold = hold;
 }
 
 // C-1: single authorization helper, used both for fresh commands and for the
@@ -57,6 +65,7 @@ void motor_task(void *pvParameters)
     bool in_cooldown = false;
     int32_t last_ignored_speed = -1; // Track last ignored speed command to avoid repeated logs
     int32_t last_reported_speed = -1; // Track last speed reported over the link to avoid repeated logs
+    bool obstacle_logged = false; // Log the ignored speed once per obstacle, not every cycle
 
     serial_line("[MotorTask] Motor task started");
 
@@ -130,6 +139,20 @@ void motor_task(void *pvParameters)
                             last_ignored_speed = value;
                         }
                         has_valid_command = false; // Treat as no command
+                    }
+                    // An obstacle ahead: brake and hold, without leaving
+                    // ARMED/RUNNING. Ignoring the command here (and not only in
+                    // the fail-safe branch below) keeps the PWM from being
+                    // applied for one cycle before that branch cuts it.
+                    else if (obstacle_hold)
+                    {
+                        if (!obstacle_logged)
+                        {
+                            serial_line("[MotorTask] Speed command ignored (obstacle ahead)");
+                            obstacle_logged = true;
+                        }
+                        has_valid_command = false; // Treat as no command
+                        last_ignored_speed = -1;
                     }
                     // Only allow speed commands if not in cooldown
                     else if (in_cooldown)
@@ -233,9 +256,15 @@ void motor_task(void *pvParameters)
         // means brake. The whole loop is guarded by the system state, not only
         // the CMD_SET_SPEED branch, so DISARM/FAULT stop the vehicle for good
         // and an expired command never re-applies the last speed.
-        if (in_cooldown || !motor_control_allowed())
+        if (!obstacle_hold)
         {
-            // Ensure motor stays stopped during cooldown / while not authorized
+            obstacle_logged = false;
+        }
+
+        if (in_cooldown || !motor_control_allowed() || obstacle_hold)
+        {
+            // Ensure motor stays stopped during cooldown / while not authorized /
+            // while there is an obstacle ahead
             motor_stop();
             current_speed = 0;
             last_reported_speed = 0;
@@ -256,8 +285,8 @@ void motor_task(void *pvParameters)
             //   - Losing the link stops the M:PING:0 stream, the watchdog
             //     latches FAULT, motor_control_allowed() goes false, and the
             //     branch above brakes and clears current_speed.
-            //   - DISARM, E-STOP, ultrasonic and cooldown all land in that same
-            //     branch, which zeroes current_speed - so there is nothing left
+            //   - DISARM, E-STOP, the ultrasonic hold and cooldown all land in
+            //     that same branch, which zeroes current_speed - so there is nothing left
             //     to latch and the vehicle cannot restart on its own.
             // Without the watchdog covering BOTH modes and without FAULT being
             // sticky, this branch would be the C-1 bug all over again.

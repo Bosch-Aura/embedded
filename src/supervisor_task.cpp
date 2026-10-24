@@ -218,19 +218,6 @@ void supervisor_update_heartbeat(void) {
     last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 }
 
-// ALTO-1: latch the system into FAULT from another task.
-// FAULT never clears by itself, so whoever calls this guarantees the vehicle
-// stays stopped until an operator re-arms. Used by the ultrasonic emergency:
-// braking alone was not enough, because once the 5 s cooldown expired the state
-// was still RUNNING and a fresh SET_SPEED made the vehicle drive off again.
-void supervisor_trigger_fault(const char *reason) {
-    if (current_state != STATE_FAULT) {
-        current_state = STATE_FAULT;
-        serial_linef("EVENT:FAULT_TRIGGERED:%s", reason != NULL ? reason : "UNKNOWN");
-        Serial.flush();
-    }
-}
-
 system_state_t supervisor_get_state(void) {
     return current_state;
 }

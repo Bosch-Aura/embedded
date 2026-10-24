@@ -16,7 +16,6 @@ typedef struct {
 
 void supervisor_task(void *pvParameters);
 void supervisor_update_heartbeat(void);
-void supervisor_trigger_fault(const char *reason);
 system_state_t supervisor_get_state(void);
 
 #ifdef __cplusplus

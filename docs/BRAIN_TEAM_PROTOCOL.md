@@ -93,7 +93,7 @@ Establece la velocidad del motor de tracción.
   `FAULT`, frena y borra la velocidad latcheada. Por eso, si mandás la velocidad una sola vez,
   tenés que mantener el enlace con `M:PING:0` (ver §TTL y watchdog).
 
-  La velocidad latcheada también se borra con `E:BRAKE_NOW`, `M:SYS_DISARM`, E-STOP y ultrasonido:
+  La velocidad latcheada también se borra con `E:BRAKE_NOW`, `M:SYS_DISARM`, E-STOP y obstáculo del ultrasonido:
   después de cualquiera de ellos el auto queda parado hasta recibir un `SET_SPEED` nuevo. Nunca
   vuelve a arrancar solo.
 
@@ -420,7 +420,7 @@ y no debe parsearse):
 | `EVENT:CMD_EXECUTED:SET_SPEED:<v>` | La velocidad aplicada cambió (valor ya saturado a 0-255) |
 | `EVENT:CMD_EXECUTED:SET_STEER:<v>` | El ángulo aplicado cambió (valor ya saturado a 50-160) |
 | `EVENT:CMD_EXECUTED:SET_STEER_CENTER` | Dirección centrada por `SYS_DISARM`, watchdog o E-STOP |
-| `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` | Se aplicó un freno de emergencia, venga de donde venga: `E:BRAKE_NOW`/`E:STOP`, `SYS_DISARM`, watchdog, E-STOP físico o ultrasonido. Arranca el bloqueo de 5 s |
+| `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` | Se aplicó un freno de emergencia, venga de donde venga: `E:BRAKE_NOW`/`E:STOP`, `SYS_DISARM`, watchdog o E-STOP físico. Arranca el bloqueo de 5 s. (El ultrasonido **no** lo emite: ver `OBSTACLE_DETECTED`) |
 | `EVENT:CMD_EXECUTED:BRAKE_NOW` | Ya no se emite: solo lo provocaba la página web (`/driveStop`), que se eliminó |
 | `EVENT:CMD_EXECUTED:<SYS_ARM\|SYS_DISARM>` | Comando de armado aplicado (`SYS_ARM` se confirma siempre) |
 | `EVENT:CMD_EXECUTED:<LIGHTS_ON\|LIGHTS_OFF\|LIGHTS_AUTO>` | El modo de luces cambió |
@@ -428,7 +428,8 @@ y no debe parsearse):
 | `EVENT:ESTOP_TRIGGERED:GPIO` | E-STOP físico accionado |
 | `EVENT:ESTOP_RELEASED` | E-STOP físico liberado |
 | `EVENT:WATCHDOG_TIMEOUT` | Pérdida de enlace |
-| `EVENT:FAULT_TRIGGERED:<motivo>` | Otra tarea forzó `FAULT`. Hoy el único motivo es `ULTRASONIC_OBSTACLE` (obstáculo a < 30 cm en 3 lecturas seguidas, ~150 ms) |
+| `EVENT:OBSTACLE_DETECTED:<cm>` | Obstáculo a < 30 cm en 3 lecturas válidas (las lecturas sin eco no cortan la cuenta; ~0,2-1 s). El motor frena y queda frenado; **el estado no cambia** (sigue `RUNNING`) y no hay bloqueo de 5 s |
+| `EVENT:OBSTACLE_CLEARED` | 3 lecturas a ≥ 35 cm, o 10 seguidas sin eco (~0,8 s). Se suelta el freno, pero el auto sigue parado hasta un `C:SET_SPEED` nuevo |
 | `EVENT:FATAL:TASK_CREATE_FAILED:<tarea>` | Fallo de arranque; el equipo reinicia |
 | `EVENT:FATAL:MAILBOX_INIT_FAILED` | Fallo de arranque; el equipo reinicia |
 | `EVENT:FATAL:TX_QUEUE_CREATE_FAILED` | Fallo de arranque; el equipo reinicia |
@@ -453,15 +454,14 @@ parten.
 
 ### Recuperación de FAULT
 
-Se entra en `STATE_FAULT` por **watchdog** (pérdida de enlace, `EVENT:WATCHDOG_TIMEOUT`), por
-**E-STOP físico** (`EVENT:ESTOP_TRIGGERED:GPIO`) o por el **ultrasonido** (obstáculo a menos de
-30 cm durante 3 lecturas seguidas, `EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`). En los tres casos
-se frena y se borra la velocidad latcheada; watchdog y E-STOP además centran la dirección.
+Se entra en `STATE_FAULT` por **watchdog** (pérdida de enlace, `EVENT:WATCHDOG_TIMEOUT`) o por
+**E-STOP físico** (`EVENT:ESTOP_TRIGGERED:GPIO`). En los dos casos se frena, se borra la velocidad
+latcheada y se centra la dirección. Un obstáculo del ultrasonido **no** es `FAULT` (ver
+§Obstáculos).
 FAULT bloquea todos los comandos de control y **no se borra solo**. Para recuperarse:
 
 1. **Eliminar la causa.** Si fue el E-STOP, liberarlo (llega `EVENT:ESTOP_RELEASED`).
-   Si fue el watchdog, restablecer el enlace. Si fue el ultrasonido, sacar el obstáculo: el
-   firmware no lo comprueba al rearmar, así que si sigue ahí vuelve a `FAULT` a los ~150 ms.
+   Si fue el watchdog, restablecer el enlace.
 2. Enviar `M:SYS_ARM:0`.
    - Si el E-STOP sigue accionado se responde `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE`
      y el sistema **permanece** en FAULT.
@@ -476,9 +476,28 @@ tras un FAULT (ver §Clientes conocidos).
 conservadora. Tras un frenado de emergencia hay un **bloqueo de 5 s** durante el cual
 el motor no responde aunque el sistema esté armado.
 
-El ultrasonido **funciona** y está siempre activo, en cualquier estado. (Durante un tiempo se creyó
-que estaba muerto; en realidad había un obstáculo real a 22 cm delante del sensor.) Tenelo en
-cuenta en el banco: una pared, una caja o una mano a menos de 30 cm lleva el auto a `FAULT`.
+### Obstáculos
+
+El ultrasonido está siempre activo. Con 3 lecturas válidas a menos de 30 cm
+llega `EVENT:OBSTACLE_DETECTED:<cm>` y el motor **frena y se queda frenado** mientras el obstáculo
+siga ahí: los `C:SET_SPEED` se ignoran. **No desarma ni pasa a `FAULT`**: el estado sigue en
+`RUNNING`, no hay bloqueo de 5 s y no hay que rearmar. La dirección no se toca.
+
+**Lecturas sin eco.** El sensor devuelve 0 tanto con el camino libre (nada en ~4 m) como con un
+objeto muy cerca: con un obstáculo real a 6 cm leía 6 una vez cada cuatro y 0 el resto. Por eso
+un 0 suelto no cuenta ni como obstáculo ni como libre; antes reiniciaba la cuenta y el auto **no
+frenaba** con ese obstáculo.
+
+Cuando hay 3 lecturas a 35 cm o más, o 10 seguidas sin eco (~0,8 s), llega `EVENT:OBSTACLE_CLEARED`. Durante el
+frenado se borró la velocidad latcheada, así que **el auto no arranca solo**: vuelve a andar con el
+próximo `C:SET_SPEED`. Un cliente que manda la velocidad en cada ciclo (como `bfmc_hardware_bridge`)
+sigue enseguida; uno que la manda una sola vez (latching) tiene que volver a mandarla. Seguir o no
+es una decisión de la Jetson.
+
+Antes un obstáculo llevaba a `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`): el auto quedaba
+parado hasta que alguien lo rearmara a mano, y ese evento ya no existe.
+
+Tenelo en cuenta en el banco: una pared, una caja o una mano a menos de 30 cm frena el auto.
 
 ### Conexión y puerto serie
 - **USB**: 115200 baud. Es por donde salen todos los eventos.
