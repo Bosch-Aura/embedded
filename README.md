@@ -17,7 +17,7 @@ Este diseño prioriza la estabilidad del bucle de control y la simplicidad en la
 El diseño actual se fundamenta en los siguientes principios:
 
 * **Determinismo de Ciclo:** Las tareas de actuación (Motor/Dirección) mantienen una cadencia fija de 100Hz (10ms), lo que asegura que el PWM se actualice de forma constante.
-* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura. El control es ***latching***: cuando el comando vence su TTL, `MotorTask` **no frena**, sostiene la última velocidad (y `SteerTask` el último ángulo). La protección ante la pérdida de enlace la da el **watchdog** del supervisor (300 ms en `AUTO`, 1000 ms en `MANUAL`): sin comandos válidos lleva el sistema a `FAULT`, que frena y borra la velocidad latcheada. El lazo completo está además guardado por el estado del sistema, de modo que `DISARM` y `FAULT` detienen la tracción y la mantienen detenida.
+* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura. El control es ***latching***: cuando el comando vence su TTL, `MotorTask` **no frena**, sostiene la última velocidad (y `SteerTask` el último ángulo). La protección ante la pérdida de enlace la da el **watchdog** del supervisor (300 ms): sin comandos válidos lleva el sistema a `FAULT`, que frena y borra la velocidad latcheada. El lazo completo está además guardado por el estado del sistema, de modo que `DISARM` y `FAULT` detienen la tracción y la mantienen detenida.
 * **Separación de Recursos:** Se utiliza *Core Pinning* para aislar el procesamiento de comunicaciones (Core 1) de la ejecución crítica de movimiento (Core 0).
 
 ## 2. Estrategia de Comunicación Inter-Procesos (IPC)
@@ -39,8 +39,8 @@ Para garantizar la seguridad crítica, el sistema implementa un canal de comunic
     3.  **Prioridad de Ejecución:** La lógica de emergencia se evalúa antes que cualquier comando de movimiento estándar. **Latencia real: hasta ~50 ms en el peor caso** (polling de `LinkRxTask` 10 ms + ciclo de `MotorTask` 10 ms + bloqueo de `pulseIn()` del ultrasonido hasta 30 ms). La notificación no interrumpe el `vTaskDelay()` del lazo: ver hallazgos A-1 y A-2 de `docs/PLAN_MEJORAS.md`.
 
 * **Fuentes de Disparo:**
-    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas; además lleva el sistema a `FAULT`).
-    * **Comandos Externos:** Solicitud de parada inmediata vía UART o Web (Botón de Pánico).
+    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas). **No** usa este camino ni pasa a `FAULT`: pone el sistema en `STOPPED` mientras haya obstáculo (`supervisor_set_obstacle()`). Ver §3.2.
+    * **Comandos Externos:** Solicitud de parada inmediata vía serie (`E:BRAKE_NOW` / `E:STOP`).
     * **Sistema:** Fallos de estado detectados por el Supervisor.
 
 | Característica | Comandos Normales | Emergencia |
@@ -76,22 +76,22 @@ typedef struct {
 ### 3.2 Subsistema de Supervisión (`SupervisorTask`)
 El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gestión del Estado del Sistema**.
 
-* **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` → `FAULT`).
-* **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` en modo `MANUAL` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
+* **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` ⇄ `STOPPED`, y `FAULT`).
+* **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
 * **Un comando a la vez:** el `supervisor_mailbox` tiene un solo lugar y se revisa cada 20 ms; dos comandos de gestión seguidos pueden pisarse. Cada comando se ejecuta una sola vez (por *timestamp*), aunque su TTL sea de 5 s.
-* **Fuentes de Comandos:** `link_rx_task` (UART) y `web_task` (HTTP).
+* **Fuente de Comandos:** `link_rx_task` (USB y UART externo). El firmware no tiene página web ni Wi-Fi.
 
 | Comando | Acción | Transición Típica |
 | :--- | :--- | :--- |
 | **CMD_SYS_ARM** | Habilita el sistema y resetea heartbeat. Rechazado si el E-STOP sigue accionado. | `DISARMED`/`FAULT` → `ARMED` |
 | **CMD_SYS_DISARM** | Notifica emergencia a `MotorTask`, centra dirección vía mailbox y deshabilita. | `ANY` → `DISARMED` |
-| **CMD_SYS_MODE** | Cambia lógica de control (`AUTO` vs `MANUAL`). | Afecta Watchdog |
+| **M:SYS_STOP** / **M:SYS_RESUME** | No van por el mailbox: `LinkRxTask` engancha o suelta una bandera (`supervisor_latch_stop()` / `supervisor_release_stop()`). Solo `SYS_RESUME` suelta el stop. | `RUNNING` ⇄ `STOPPED` |
 
 * **Funciones Adicionales:**
-    * **Watchdog/Heartbeat:** verifica recepción constante de datos en **ambos modos** (300 ms en `AUTO`, 1000 ms en `MANUAL`). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
+    * **Watchdog/Heartbeat:** verifica recepción constante de datos (300 ms, uno solo para cualquier cliente: el firmware no tiene modos de manejo, eso lo decide la Jetson). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
     * **E-STOP Hardware:** Monitoreo directo de pin GPIO para parada de emergencia física.
-    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING` (en `AUTO` hace falta `RUNNING`).
-    * **`FAULT` desde otras tareas:** `supervisor_trigger_fault()` permite a `UltrasonicTask` dejar el sistema en `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`). `FAULT` nunca se borra solo: hace falta `M:SYS_ARM:0`.
+    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING` (o mientras hay un pedido de `STOPPED`).
+    * **`STOPPED`:** estado armado pero quieto: velocidad 0 y servo congelado donde está (no se centra). Se entra por un obstáculo del ultrasonido (`EVENT:OBSTACLE_DETECTED:<cm>`) o por `M:SYS_STOP:0`, que queda **enganchado** hasta `M:SYS_RESUME:0`: ningún otro comando lo suelta, ni siquiera desarmar y volver a armar. Se vuelve solo a `RUNNING` cuando no queda ninguna de las dos causas. `MotorTask` y `SteerTask` consultan `supervisor_stop_requested()` en cada ciclo, así que frenan sin esperar el ciclo del supervisor. Al frenar se borra la velocidad latcheada: el auto vuelve a andar solo con un `C:SET_SPEED` nuevo. `FAULT` (watchdog o E-STOP) nunca se borra solo: hace falta `M:SYS_ARM:0`.
 
 ---
 
@@ -124,14 +124,22 @@ sequenceDiagram
 
     %% CASO 2: EMERGENCIA (FAST PATH)
     Note over Consumer: Estado: BLOCKED (Delay 10ms)
-    Safety->>Safety: Obstáculo Detectado!
+    Producer->>Producer: E:BRAKE_NOW recibido
     
     rect rgb(60, 20, 20)
-        note right of Safety: Fast Path (~50ms peor caso, ver A-1)
-        Safety->>Consumer: xTaskNotify(EMERGENCY)
+        note right of Producer: Fast Path (~50ms peor caso, ver A-1)
+        Producer->>Consumer: xTaskNotify(EMERGENCY)
         Note over Consumer: DESPIERTA INMEDIATAMENTE
         Consumer->>Consumer: STOP MOTOR
     end
+
+    %% CASO 3: OBSTÁCULO -> STOPPED (SIN FAULT)
+    Safety->>Safety: Obstáculo < 30 cm (3 lecturas)
+    Safety->>Consumer: supervisor_set_obstacle(true)
+    Note over Consumer: STOPPED: frena, ignora SET_SPEED y SET_STEER
+    Safety->>Safety: Despejado: 3 lecturas >= 35 cm o 10 seguidas sin eco
+    Safety->>Consumer: supervisor_set_obstacle(false)
+    Note over Consumer: RUNNING (si no hay SYS_STOP), parado hasta un SET_SPEED nuevo
 ```
 
 ### 4.2 Diagrama de Despliegue
@@ -143,7 +151,6 @@ graph TD
         LGT[LightsTask<br/>Prio: 1]
         RX[LinkRxTask<br/>Prio: 4]
         TX[LinkTxTask<br/>Prio: 2]
-        WEB[WebTask<br/>Prio: 2]
         SUP[SupervisorTask<br/>Prio: 2]
     end
 
@@ -167,7 +174,6 @@ graph TD
     RX ==> MB_STR
     RX ==> MB_LGT
     RX ==> MB_SUP
-    WEB ~~~ MB_SUP
 
     %% Lectura
     MB_MOT -.->|"Lee (10ms)"| MOT
@@ -192,14 +198,14 @@ El sistema utiliza **Multiprocesamiento Asimétrico** sobre los dos núcleos del
 | :--- | :--- | :--- | :--- | :--- |
 | **Core 0** | **Safety & Motion** | `UltrasonicTask` | **Crítica (5)** | **Capa de Seguridad:** Monitoreo de entorno y prevención de colisiones. Máxima prioridad del sistema. |
 | **Core 0** | **Real-Time Control** | `MotorTask`, `SteerTask` | Alta (3-4) | Generación de PWM preciso y bucles de control. Aislado de interrupciones de red. |
-| **Core 1** | **Comms Ingress** | `LinkRxTask` | Alta (4) | Recepción y decodificación de alta velocidad (UART/WiFi). |
-| **Core 1** | **System & I/O** | `WebTask`, `Supervisor`, `LinkTx`, `Lights` | Media/Baja (1-2) | Gestión de pila TCP/IP, telemetría, watchdog y control de iluminación. |
+| **Core 1** | **Comms Ingress** | `LinkRxTask` | Alta (4) | Recepción y decodificación de alta velocidad (USB y UART externo). |
+| **Core 1** | **System & I/O** | `Supervisor`, `LinkTx`, `Lights` | Media/Baja (1-2) | Telemetría, watchdog y control de iluminación. |
 
 ### 5.2 Salida serie compartida
 
 Todas las tareas, en los dos núcleos, imprimen por el mismo `Serial` (USB). Para que las líneas no se mezclen, **toda la salida pasa por `serial_line()` / `serial_linef()`** (`src/serial_out.h`): arman la línea completa con `\r\n` y la escriben de una sola vez bajo un mutex (con herencia de prioridad). Antes, `Serial.println()` eran dos escrituras y podían salir dos eventos pegados en una línea.
 
-**Regla para código nuevo:** imprimir siempre con `serial_line()`/`serial_linef()`, nunca con `Serial.print`/`Serial.println` directo. La única salida que no pasa por ahí es la copia de `STATE_CHANGED`/`MODE_CHANGED` que `LinkTxTask` manda por `Serial1` (UART externo), que tiene una sola escritora.
+**Regla para código nuevo:** imprimir siempre con `serial_line()`/`serial_linef()`, nunca con `Serial.print`/`Serial.println` directo. La única salida que no pasa por ahí es la copia de `STATE_CHANGED` que `LinkTxTask` manda por `Serial1` (UART externo), que tiene una sola escritora.
 
 ---
 
@@ -210,7 +216,7 @@ La arquitectura actual (v2.0) proporciona una base sólida y estable. Sin embarg
 ### 6.1 Fortalezas del Diseño Actual
 * **Estabilidad de Carga (Determinismo):** Al utilizar una frecuencia de ejecución fija, el consumo de CPU es constante y predecible. El sistema es inmune a "tormentas de interrupciones" si los sensores envían datos excesivos o ruidosos.
 * **Integridad de Datos:** El patrón de **Mailbox con Mutex** garantiza que las tareas de control siempre accedan a una "foto" coherente y completa del estado (Atomicidad), eliminando condiciones de carrera sobre las variables de control.
-* **Aislamiento de Fallos:** La estrategia de **Core Pinning** ha demostrado ser eficaz para evitar que la latencia variable de la pila WiFi/TCP-IP (Core 1) afecte la generación de señales PWM críticas (Core 0).
+* **Aislamiento de Fallos:** La estrategia de **Core Pinning** ha demostrado ser eficaz para evitar que la latencia variable de las comunicaciones (Core 1) afecte la generación de señales PWM críticas (Core 0).
 * **Seguridad Híbrida:** el sistema es de *polling*. El **Fast-Path de Emergencia** evalúa la notificación al principio del ciclo, pero **no** elude la espera: `ulTaskNotifyTake()` se usa con timeout 0 y el lazo bloquea en `vTaskDelay()`, que las notificaciones no interrumpen. La latencia de parada es de hasta ~50 ms en el peor caso. Implementar A-1 (`docs/PLAN_MEJORAS.md`) la reduciría a <1 ms real.
 
 ### 6.2 Áreas de Optimización

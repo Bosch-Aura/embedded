@@ -21,7 +21,6 @@ Commands (type and press Enter):
   stop                Alias for speed 0
   arm                 Arm the system (M:SYS_ARM) - REQUIRED before control commands
   disarm              Disarm the system (M:SYS_DISARM)
-  mode <manual|auto>  Set system mode (M:SYS_MODE)
   demo                Send a short demo sequence
   help                Show this help
   quit / exit         Leave the simulator
@@ -133,19 +132,13 @@ def run_demo(ser: serial.Serial, delay_s: float = 0.02) -> None:
     """
     Demo: Simulate zigzag pattern
     - Arm the system first
-    - Set mode to MANUAL (no heartbeat required)
     - Start at max speed (255) going forward
     - Perform fast zigzag pattern (left-right-left-right)
     - Stop at the end
     """
     print("Starting zigzag demo...")
     
-    # Set mode to MANUAL first (no heartbeat required)
-    print("-> M:SYS_MODE:0")
-    write_line(ser, "M:SYS_MODE:0")
-    time.sleep(delay_s * 2)
-    
-    # Arm the system (will automatically transition to RUNNING in MANUAL mode)
+    # Arm the system (ARMED transitions to RUNNING automatically)
     print("-> M:SYS_ARM:0")
     write_line(ser, "M:SYS_ARM:0")
     time.sleep(delay_s * 2)
@@ -280,20 +273,6 @@ def interactive_loop(ser: serial.Serial) -> None:
                 print("(note) System must be ARMED before control commands work")
             elif cmd == "disarm":
                 msg = "M:SYS_DISARM:0"
-                print(f"-> {msg}")
-                write_line(ser, msg)
-            elif cmd == "mode":
-                if len(parts) != 2:
-                    print("Usage: mode <manual|auto>")
-                    continue
-                mode_val = parts[1].lower()
-                if mode_val == "auto":
-                    msg = "M:SYS_MODE:1"
-                elif mode_val == "manual":
-                    msg = "M:SYS_MODE:0"
-                else:
-                    print("Mode must be 'manual' or 'auto'")
-                    continue
                 print(f"-> {msg}")
                 write_line(ser, msg)
             elif cmd == "demo":

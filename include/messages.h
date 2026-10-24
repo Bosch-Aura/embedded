@@ -16,7 +16,6 @@ typedef enum {
     CMD_STOP,
     CMD_SYS_ARM,
     CMD_SYS_DISARM,
-    CMD_SYS_MODE,
     CMD_LIGHTS_ON,
     CMD_LIGHTS_OFF,
     CMD_LIGHTS_AUTO,
@@ -34,18 +33,16 @@ typedef enum {
     TOPIC_MANAGEMENT
 } topic_t;
 
-// System modes
-typedef enum {
-    MODE_MANUAL,
-    MODE_AUTO
-} system_mode_t;
-
 // System states
 typedef enum {
     STATE_DISARMED,
     STATE_ARMED,
     STATE_RUNNING,
-    STATE_FAULT
+    STATE_FAULT,
+    // Armed but held still: speed 0 and the servo frozen where it is, while an
+    // obstacle is ahead or after M:SYS_STOP:0 (latched until M:SYS_RESUME:0).
+    // Returns to RUNNING by itself when neither is active; no re-arm needed.
+    STATE_STOPPED
 } system_state_t;
 
 // UART channel prefixes

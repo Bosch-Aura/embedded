@@ -16,7 +16,6 @@ REQUIRED_HEADERS=(
     "include/hardware.h"
     "include/mailbox.h"
     "include/messages.h"
-    "include/webpage.h"
 )
 
 for header in "${REQUIRED_HEADERS[@]}"; do
@@ -41,8 +40,6 @@ REQUIRED_SOURCES=(
     "src/link_rx_task.cpp"
     "src/link_tx_task.cpp"
     "src/supervisor_task.cpp"
-    "src/web_task.cpp"
-    "src/webpage.cpp"
 )
 
 for source in "${REQUIRED_SOURCES[@]}"; do
@@ -91,7 +88,6 @@ TASKS=(
     "link_rx_task"
     "link_tx_task"
     "supervisor_task"
-    "web_task"
 )
 
 for task in "${TASKS[@]}"; do

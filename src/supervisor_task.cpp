@@ -10,8 +10,8 @@
 #include <Arduino.h>
 
 #define SUPERVISOR_TASK_PERIOD_MS 20
-// Watchdog timeouts come from hardware.h (WATCHDOG_TIMEOUT_AUTO_MS /
-// WATCHDOG_TIMEOUT_MANUAL_MS). Do not redefine them here.
+// The watchdog timeout comes from hardware.h (WATCHDOG_TIMEOUT_MS). Do not
+// redefine it here.
 
 static mailbox_t *supervisor_mb = NULL;
 static mailbox_t *motor_mb = NULL;
@@ -19,10 +19,13 @@ static mailbox_t *steer_mb = NULL;
 
 // MEDIO-3: these are written by SupervisorTask (core 1) and read by
 // motor_control_allowed() from MotorTask (core 0), and last_heartbeat_ms is
-// written from LinkRxTask and WebTask too. Without volatile the compiler is
+// written from LinkRxTask too. Without volatile the compiler is
 // free to hoist the load out of MotorTask's while(1) - which would freeze the
 // traction authorization at whatever value it had on the first iteration.
-static volatile system_mode_t current_mode = MODE_MANUAL;
+//
+// There are no driving modes here: whether the car drives itself or a person
+// drives it is decided on the Jetson. The firmware only knows whether it is
+// allowed to move (the state) and whether the link is alive (the watchdog).
 
 // Boot state.
 //
@@ -30,7 +33,7 @@ static volatile system_mode_t current_mode = MODE_MANUAL;
 // requiring an explicit M:SYS_ARM:0 before anything can move.
 //
 // -DBOOT_ARMED (set in platformio.ini) skips that handshake: the vehicle comes
-// up ARMED and, in MANUAL mode, immediately auto-transitions to RUNNING. The
+// up ARMED and immediately auto-transitions to RUNNING. The
 // consequence is that the FIRST C:SET_SPEED to arrive is obeyed - there is no
 // arming step to forget and no dashboard needed. It is still not able to move
 // on its own: with no sustained command MotorTask brakes every cycle (C-1).
@@ -44,6 +47,13 @@ static volatile system_state_t current_state = STATE_DISARMED;
 static system_state_t previous_state = STATE_DISARMED;
 #endif
 static volatile uint32_t last_heartbeat_ms = 0;
+
+// STOPPED requests (see supervisor_stop_requested()).
+// stop_latched survives DISARM, FAULT and re-ARM on purpose: an armed car that
+// was told to stop comes back STOPPED, never RUNNING, until M:SYS_RESUME:0.
+// Only a reboot clears it.
+static volatile bool obstacle_active = false;
+static volatile bool stop_latched = false;
 
 // Age of the last heartbeat, or false if none has arrived yet.
 //
@@ -80,19 +90,12 @@ void supervisor_task(void *pvParameters) {
     // The TX queue is now created in setup() before any task exists, so there is
     // nothing to wait for.
 
-    // Print initial state and mode at boot
-    serial_linef("EVENT:STATE_CHANGED:%s",
-                 current_state == STATE_DISARMED ? "DISARMED" :
-                   current_state == STATE_ARMED ? "ARMED" :
-                   current_state == STATE_RUNNING ? "RUNNING" : "FAULT");
-    Serial.flush();
-    
-    serial_linef("EVENT:MODE_CHANGED:%s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
+    // Print initial state at boot
+    serial_linef("EVENT:STATE_CHANGED:%s", supervisor_state_name(current_state));
     Serial.flush();
     
     // Also send via link_tx for UART transmission
     link_tx_send_state_event(current_state);
-    link_tx_send_mode_event(current_mode);
     
     while (1) {
         
@@ -154,25 +157,6 @@ void supervisor_task(void *pvParameters) {
                         }
                         break;
                         
-                    case CMD_SYS_MODE:
-                        {
-                            system_mode_t new_mode = (value == MODE_AUTO) ? MODE_AUTO : MODE_MANUAL;
-                            if (new_mode != current_mode) {
-                                current_mode = new_mode;
-                                // Reset heartbeat when switching to AUTO mode
-                                // This prevents immediate watchdog timeout if last_heartbeat_ms was old
-                                if (current_mode == MODE_AUTO) {
-                                    last_heartbeat_ms = 0;
-                                    serial_line("[SupervisorTask] Heartbeat reset - waiting for first UART message");
-                                }
-                                serial_linef("EVENT:CMD_EXECUTED:SYS_MODE:%s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                                Serial.flush();
-                                serial_linef("[SupervisorTask] Mode changed to: %s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                                link_tx_send_mode_event(current_mode);
-                            }
-                        }
-                        break;
-                        
                     default:
                         break;
                 }
@@ -197,15 +181,11 @@ void supervisor_task(void *pvParameters) {
         }
         
         // Watchdog: Check heartbeat timeout.
-        // C-4: it must cover BOTH modes. MANUAL is the default mode, so guarding
-        // only AUTO left the boot configuration with no link-loss protection.
+        // C-4: it must cover every armed state, whoever is driving.
         if (current_state != STATE_DISARMED && current_state != STATE_FAULT) {
-            uint32_t watchdog_timeout_ms = (current_mode == MODE_AUTO)
-                                               ? WATCHDOG_TIMEOUT_AUTO_MS
-                                               : WATCHDOG_TIMEOUT_MANUAL_MS;
             uint32_t heartbeat_age;
             if (heartbeat_age_ms(&heartbeat_age)) {
-                if (heartbeat_age > watchdog_timeout_ms) {
+                if (heartbeat_age > WATCHDOG_TIMEOUT_MS) {
                     serial_line("EVENT:WATCHDOG_TIMEOUT");
                     Serial.flush();
                     serial_linef("[SupervisorTask] Watchdog timeout! Heartbeat age: %lu ms",
@@ -218,25 +198,26 @@ void supervisor_task(void *pvParameters) {
         }
         
         // State machine transitions
+        // ARMED automatically transitions to RUNNING
         if (current_state == STATE_ARMED) {
-            if (current_mode == MODE_AUTO) {
-                // In AUTO mode, transition to RUNNING if we have valid heartbeat
-                uint32_t heartbeat_age;
-                if (heartbeat_age_ms(&heartbeat_age) && heartbeat_age < WATCHDOG_TIMEOUT_AUTO_MS) {
-                    if (current_state != STATE_RUNNING) {
-                        current_state = STATE_RUNNING;
-                        serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
-                        Serial.flush();
-                    }
-                }
-            } else {
-                // In MANUAL mode, ARMED automatically transitions to RUNNING
-                if (current_state != STATE_RUNNING) {
-                    current_state = STATE_RUNNING;
-                    serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
-                    Serial.flush();
-                }
-            }
+            current_state = STATE_RUNNING;
+            serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
+            Serial.flush();
+        }
+
+        // RUNNING <-> STOPPED follows the stop requests. MotorTask and SteerTask
+        // already hold still as soon as a request appears; this makes it a
+        // state the client can see.
+        const bool stop = supervisor_stop_requested();
+        if (current_state == STATE_RUNNING && stop) {
+            current_state = STATE_STOPPED;
+            serial_linef("EVENT:STATE_AUTO_TRANSITION:RUNNING->STOPPED:%s",
+                         stop_latched ? "SYS_STOP" : "OBSTACLE");
+            Serial.flush();
+        } else if (current_state == STATE_STOPPED && !stop) {
+            current_state = STATE_RUNNING;
+            serial_line("EVENT:STATE_AUTO_TRANSITION:STOPPED->RUNNING");
+            Serial.flush();
         }
         
         // Send event if state changed (for automatic transitions)
@@ -256,21 +237,35 @@ void supervisor_update_heartbeat(void) {
     last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 }
 
-// ALTO-1: latch the system into FAULT from another task.
-// FAULT never clears by itself, so whoever calls this guarantees the vehicle
-// stays stopped until an operator re-arms. Used by the ultrasonic emergency:
-// braking alone was not enough, because once the 5 s cooldown expired the state
-// was still RUNNING and a fresh SET_SPEED made the vehicle drive off again.
-void supervisor_trigger_fault(const char *reason) {
-    if (current_state != STATE_FAULT) {
-        current_state = STATE_FAULT;
-        serial_linef("EVENT:FAULT_TRIGGERED:%s", reason != NULL ? reason : "UNKNOWN");
-        Serial.flush();
-    }
+void supervisor_set_obstacle(bool obstacle) {
+    obstacle_active = obstacle;
 }
 
-system_mode_t supervisor_get_mode(void) {
-    return current_mode;
+// Called only from LinkRxTask, so the read-then-write is not racy.
+bool supervisor_latch_stop(void) {
+    const bool changed = !stop_latched;
+    stop_latched = true;
+    return changed;
+}
+
+bool supervisor_release_stop(void) {
+    const bool changed = stop_latched;
+    stop_latched = false;
+    return changed;
+}
+
+bool supervisor_stop_requested(void) {
+    return obstacle_active || stop_latched;
+}
+
+const char *supervisor_state_name(system_state_t state) {
+    switch (state) {
+        case STATE_DISARMED: return "DISARMED";
+        case STATE_ARMED:    return "ARMED";
+        case STATE_RUNNING:  return "RUNNING";
+        case STATE_STOPPED:  return "STOPPED";
+        default:             return "FAULT";
+    }
 }
 
 system_state_t supervisor_get_state(void) {
