@@ -34,16 +34,7 @@ void steer_task(void *pvParameters) {
                     case CMD_SET_STEER: {
                         // Check system state before allowing steering commands
                         system_state_t state = supervisor_get_state();
-                        system_mode_t mode = supervisor_get_mode();
-                        bool can_control = false;
-                        
-                        if (mode == MODE_AUTO) {
-                            // In AUTO mode, need to be RUNNING
-                            can_control = (state == STATE_RUNNING);
-                        } else {
-                            // In MANUAL mode, ARMED is enough
-                            can_control = (state == STATE_ARMED || state == STATE_RUNNING);
-                        }
+                        bool can_control = (state == STATE_ARMED || state == STATE_RUNNING);
                         
                         if (!can_control) {
                             // Only print if this is a different command than the last ignored one

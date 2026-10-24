@@ -17,7 +17,7 @@ Este diseño prioriza la estabilidad del bucle de control y la simplicidad en la
 El diseño actual se fundamenta en los siguientes principios:
 
 * **Determinismo de Ciclo:** Las tareas de actuación (Motor/Dirección) mantienen una cadencia fija de 100Hz (10ms), lo que asegura que el PWM se actualice de forma constante.
-* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura. El control es ***latching***: cuando el comando vence su TTL, `MotorTask` **no frena**, sostiene la última velocidad (y `SteerTask` el último ángulo). La protección ante la pérdida de enlace la da el **watchdog** del supervisor (300 ms en `AUTO`, 1000 ms en `MANUAL`): sin comandos válidos lleva el sistema a `FAULT`, que frena y borra la velocidad latcheada. El lazo completo está además guardado por el estado del sistema, de modo que `DISARM` y `FAULT` detienen la tracción y la mantienen detenida.
+* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura. El control es ***latching***: cuando el comando vence su TTL, `MotorTask` **no frena**, sostiene la última velocidad (y `SteerTask` el último ángulo). La protección ante la pérdida de enlace la da el **watchdog** del supervisor (300 ms): sin comandos válidos lleva el sistema a `FAULT`, que frena y borra la velocidad latcheada. El lazo completo está además guardado por el estado del sistema, de modo que `DISARM` y `FAULT` detienen la tracción y la mantienen detenida.
 * **Separación de Recursos:** Se utiliza *Core Pinning* para aislar el procesamiento de comunicaciones (Core 1) de la ejecución crítica de movimiento (Core 0).
 
 ## 2. Estrategia de Comunicación Inter-Procesos (IPC)
@@ -77,7 +77,7 @@ typedef struct {
 El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gestión del Estado del Sistema**.
 
 * **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` → `FAULT`).
-* **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` en modo `MANUAL` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
+* **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
 * **Un comando a la vez:** el `supervisor_mailbox` tiene un solo lugar y se revisa cada 20 ms; dos comandos de gestión seguidos pueden pisarse. Cada comando se ejecuta una sola vez (por *timestamp*), aunque su TTL sea de 5 s.
 * **Fuente de Comandos:** `link_rx_task` (USB y UART externo). El firmware no tiene página web ni Wi-Fi.
 
@@ -85,12 +85,11 @@ El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gesti
 | :--- | :--- | :--- |
 | **CMD_SYS_ARM** | Habilita el sistema y resetea heartbeat. Rechazado si el E-STOP sigue accionado. | `DISARMED`/`FAULT` → `ARMED` |
 | **CMD_SYS_DISARM** | Notifica emergencia a `MotorTask`, centra dirección vía mailbox y deshabilita. | `ANY` → `DISARMED` |
-| **CMD_SYS_MODE** | Cambia lógica de control (`AUTO` vs `MANUAL`). | Afecta Watchdog |
 
 * **Funciones Adicionales:**
-    * **Watchdog/Heartbeat:** verifica recepción constante de datos en **ambos modos** (300 ms en `AUTO`, 1000 ms en `MANUAL`). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
+    * **Watchdog/Heartbeat:** verifica recepción constante de datos (300 ms, uno solo para cualquier cliente: el firmware no tiene modos de manejo, eso lo decide la Jetson). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
     * **E-STOP Hardware:** Monitoreo directo de pin GPIO para parada de emergencia física.
-    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING` (en `AUTO` hace falta `RUNNING`).
+    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING`.
     * **`FAULT` desde otras tareas:** `supervisor_trigger_fault()` permite a `UltrasonicTask` dejar el sistema en `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`). `FAULT` nunca se borra solo: hace falta `M:SYS_ARM:0`.
 
 ---
@@ -197,7 +196,7 @@ El sistema utiliza **Multiprocesamiento Asimétrico** sobre los dos núcleos del
 
 Todas las tareas, en los dos núcleos, imprimen por el mismo `Serial` (USB). Para que las líneas no se mezclen, **toda la salida pasa por `serial_line()` / `serial_linef()`** (`src/serial_out.h`): arman la línea completa con `\r\n` y la escriben de una sola vez bajo un mutex (con herencia de prioridad). Antes, `Serial.println()` eran dos escrituras y podían salir dos eventos pegados en una línea.
 
-**Regla para código nuevo:** imprimir siempre con `serial_line()`/`serial_linef()`, nunca con `Serial.print`/`Serial.println` directo. La única salida que no pasa por ahí es la copia de `STATE_CHANGED`/`MODE_CHANGED` que `LinkTxTask` manda por `Serial1` (UART externo), que tiene una sola escritora.
+**Regla para código nuevo:** imprimir siempre con `serial_line()`/`serial_linef()`, nunca con `Serial.print`/`Serial.println` directo. La única salida que no pasa por ahí es la copia de `STATE_CHANGED` que `LinkTxTask` manda por `Serial1` (UART externo), que tiene una sola escritora.
 
 ---
 

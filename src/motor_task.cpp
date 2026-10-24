@@ -38,14 +38,6 @@ void motor_set_requested_direction(bool forward)
 static bool motor_control_allowed(void)
 {
     system_state_t state = supervisor_get_state();
-    system_mode_t mode = supervisor_get_mode();
-
-    if (mode == MODE_AUTO)
-    {
-        // In AUTO mode, need to be RUNNING
-        return (state == STATE_RUNNING);
-    }
-    // In MANUAL mode, ARMED is enough
     return (state == STATE_ARMED || state == STATE_RUNNING);
 }
 

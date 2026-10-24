@@ -22,7 +22,7 @@ static mailbox_t *supervisor_mb = NULL;
 // M-14: works on a stack buffer, no strdup/malloc in the hot path (this is the
 // task that also handles the emergency brake).
 // A-9: returns the value both as raw text and as integer, so callers can tell
-// "AUTO" from a number instead of silently getting atoi("AUTO") == 0.
+// text from a number instead of silently getting atoi("AUTO") == 0.
 static bool parse_uart_message(const char *msg, char *channel, char *cmd,
                                char *value_str, size_t value_str_len, int32_t *value) {
     char buf[UART_BUF_SIZE];
@@ -224,29 +224,6 @@ void link_rx_task(void *pvParameters) {
                                 mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_DISARM, 0, 5000);
                                 command_dispatched = true;
                                 serial_line("[LinkRxTask] SYS_DISARM command");
-                            }
-                        } else if (strcmp(cmd, "SYS_MODE") == 0) {
-                            if (supervisor_mb != NULL) {
-                                // A-9: compare the RAW TEXT. The old code used atoi(), which
-                                // returns 0 for any non-numeric string, so "M:SYS_MODE:AUTO"
-                                // silently selected MANUAL - the exact opposite of the request,
-                                // leaving the system without the AUTO watchdog.
-                                int32_t mode;
-                                if (strcmp(value_str, "AUTO") == 0 || strcmp(value_str, "1") == 0) {
-                                    mode = MODE_AUTO;
-                                } else if (strcmp(value_str, "MANUAL") == 0 || strcmp(value_str, "0") == 0) {
-                                    mode = MODE_MANUAL;
-                                } else {
-                                    // Never assume a mode for an unknown value
-                                    serial_line("EVENT:CMD_REJECTED:SYS_MODE:BAD_VALUE");
-                                    Serial.flush();
-                                    break;
-                                }
-                                serial_linef("EVENT:CMD_RECEIVED:SYS_MODE:%s", mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                                Serial.flush();
-                                mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_MODE, mode, 5000);
-                                command_dispatched = true;
-                                serial_linef("[LinkRxTask] SYS_MODE: %s", mode == MODE_AUTO ? "AUTO" : "MANUAL");
                             }
                         } else if (strcmp(cmd, "LIGHTS_ON") == 0) {
                             if (lights_mb != NULL) {

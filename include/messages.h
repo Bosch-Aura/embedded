@@ -16,7 +16,6 @@ typedef enum {
     CMD_STOP,
     CMD_SYS_ARM,
     CMD_SYS_DISARM,
-    CMD_SYS_MODE,
     CMD_LIGHTS_ON,
     CMD_LIGHTS_OFF,
     CMD_LIGHTS_AUTO,
@@ -33,12 +32,6 @@ typedef enum {
     TOPIC_CONTROL,
     TOPIC_MANAGEMENT
 } topic_t;
-
-// System modes
-typedef enum {
-    MODE_MANUAL,
-    MODE_AUTO
-} system_mode_t;
 
 // System states
 typedef enum {

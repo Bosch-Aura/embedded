@@ -10,7 +10,7 @@ This directory contains unit tests and integration tests for the RC car system.
 >
 > Si se escriben, tener en cuenta que el firmware actual **no** es el que asume esta lista: el
 > estado inicial depende de `-DBOOT_ARMED` (hoy arranca `DISARMED`), el control es *latching* (un
-> comando de control vencido no frena) y el watchdog es de 300 ms en AUTO y 1000 ms en MANUAL.
+> comando de control vencido no frena) y el watchdog es de 300 ms (el firmware no tiene modos AUTO/MANUAL).
 
 ## Test Files
 
@@ -59,7 +59,6 @@ The tests use Unity test framework (included with PlatformIO). Each test file:
 ### Message Protocol Tests
 - ✅ Command type enums
 - ✅ Topic enums
-- ✅ Mode enums (MANUAL/AUTO)
 - ✅ State enums (DISARMED/ARMED/RUNNING/FAULT)
 - ✅ Channel constants
 
@@ -76,8 +75,7 @@ The tests use Unity test framework (included with PlatformIO). Each test file:
 - ✅ DISARMED → ARMED transition
 - ✅ ARMED → DISARMED transition
 - ✅ ARMED → RUNNING transition (with heartbeat)
-- ✅ Heartbeat timeout → FAULT (300 ms AUTO / 1000 ms MANUAL)
-- ✅ Mode switching (MANUAL ↔ AUTO)
+- ✅ Heartbeat timeout → FAULT (300 ms)
 - ✅ E-STOP → FAULT transition
 - ✅ Invalid transition prevention
 

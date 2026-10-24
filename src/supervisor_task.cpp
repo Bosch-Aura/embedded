@@ -10,8 +10,8 @@
 #include <Arduino.h>
 
 #define SUPERVISOR_TASK_PERIOD_MS 20
-// Watchdog timeouts come from hardware.h (WATCHDOG_TIMEOUT_AUTO_MS /
-// WATCHDOG_TIMEOUT_MANUAL_MS). Do not redefine them here.
+// The watchdog timeout comes from hardware.h (WATCHDOG_TIMEOUT_MS). Do not
+// redefine it here.
 
 static mailbox_t *supervisor_mb = NULL;
 static mailbox_t *motor_mb = NULL;
@@ -22,7 +22,10 @@ static mailbox_t *steer_mb = NULL;
 // written from LinkRxTask too. Without volatile the compiler is
 // free to hoist the load out of MotorTask's while(1) - which would freeze the
 // traction authorization at whatever value it had on the first iteration.
-static volatile system_mode_t current_mode = MODE_MANUAL;
+//
+// There are no driving modes here: whether the car drives itself or a person
+// drives it is decided on the Jetson. The firmware only knows whether it is
+// allowed to move (the state) and whether the link is alive (the watchdog).
 
 // Boot state.
 //
@@ -30,7 +33,7 @@ static volatile system_mode_t current_mode = MODE_MANUAL;
 // requiring an explicit M:SYS_ARM:0 before anything can move.
 //
 // -DBOOT_ARMED (set in platformio.ini) skips that handshake: the vehicle comes
-// up ARMED and, in MANUAL mode, immediately auto-transitions to RUNNING. The
+// up ARMED and immediately auto-transitions to RUNNING. The
 // consequence is that the FIRST C:SET_SPEED to arrive is obeyed - there is no
 // arming step to forget and no dashboard needed. It is still not able to move
 // on its own: with no sustained command MotorTask brakes every cycle (C-1).
@@ -80,19 +83,15 @@ void supervisor_task(void *pvParameters) {
     // The TX queue is now created in setup() before any task exists, so there is
     // nothing to wait for.
 
-    // Print initial state and mode at boot
+    // Print initial state at boot
     serial_linef("EVENT:STATE_CHANGED:%s",
                  current_state == STATE_DISARMED ? "DISARMED" :
                    current_state == STATE_ARMED ? "ARMED" :
                    current_state == STATE_RUNNING ? "RUNNING" : "FAULT");
     Serial.flush();
     
-    serial_linef("EVENT:MODE_CHANGED:%s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
-    Serial.flush();
-    
     // Also send via link_tx for UART transmission
     link_tx_send_state_event(current_state);
-    link_tx_send_mode_event(current_mode);
     
     while (1) {
         
@@ -154,25 +153,6 @@ void supervisor_task(void *pvParameters) {
                         }
                         break;
                         
-                    case CMD_SYS_MODE:
-                        {
-                            system_mode_t new_mode = (value == MODE_AUTO) ? MODE_AUTO : MODE_MANUAL;
-                            if (new_mode != current_mode) {
-                                current_mode = new_mode;
-                                // Reset heartbeat when switching to AUTO mode
-                                // This prevents immediate watchdog timeout if last_heartbeat_ms was old
-                                if (current_mode == MODE_AUTO) {
-                                    last_heartbeat_ms = 0;
-                                    serial_line("[SupervisorTask] Heartbeat reset - waiting for first UART message");
-                                }
-                                serial_linef("EVENT:CMD_EXECUTED:SYS_MODE:%s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                                Serial.flush();
-                                serial_linef("[SupervisorTask] Mode changed to: %s", current_mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                                link_tx_send_mode_event(current_mode);
-                            }
-                        }
-                        break;
-                        
                     default:
                         break;
                 }
@@ -197,15 +177,11 @@ void supervisor_task(void *pvParameters) {
         }
         
         // Watchdog: Check heartbeat timeout.
-        // C-4: it must cover BOTH modes. MANUAL is the default mode, so guarding
-        // only AUTO left the boot configuration with no link-loss protection.
+        // C-4: it must cover every armed state, whoever is driving.
         if (current_state != STATE_DISARMED && current_state != STATE_FAULT) {
-            uint32_t watchdog_timeout_ms = (current_mode == MODE_AUTO)
-                                               ? WATCHDOG_TIMEOUT_AUTO_MS
-                                               : WATCHDOG_TIMEOUT_MANUAL_MS;
             uint32_t heartbeat_age;
             if (heartbeat_age_ms(&heartbeat_age)) {
-                if (heartbeat_age > watchdog_timeout_ms) {
+                if (heartbeat_age > WATCHDOG_TIMEOUT_MS) {
                     serial_line("EVENT:WATCHDOG_TIMEOUT");
                     Serial.flush();
                     serial_linef("[SupervisorTask] Watchdog timeout! Heartbeat age: %lu ms",
@@ -218,25 +194,11 @@ void supervisor_task(void *pvParameters) {
         }
         
         // State machine transitions
+        // ARMED automatically transitions to RUNNING
         if (current_state == STATE_ARMED) {
-            if (current_mode == MODE_AUTO) {
-                // In AUTO mode, transition to RUNNING if we have valid heartbeat
-                uint32_t heartbeat_age;
-                if (heartbeat_age_ms(&heartbeat_age) && heartbeat_age < WATCHDOG_TIMEOUT_AUTO_MS) {
-                    if (current_state != STATE_RUNNING) {
-                        current_state = STATE_RUNNING;
-                        serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
-                        Serial.flush();
-                    }
-                }
-            } else {
-                // In MANUAL mode, ARMED automatically transitions to RUNNING
-                if (current_state != STATE_RUNNING) {
-                    current_state = STATE_RUNNING;
-                    serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
-                    Serial.flush();
-                }
-            }
+            current_state = STATE_RUNNING;
+            serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
+            Serial.flush();
         }
         
         // Send event if state changed (for automatic transitions)
@@ -267,10 +229,6 @@ void supervisor_trigger_fault(const char *reason) {
         serial_linef("EVENT:FAULT_TRIGGERED:%s", reason != NULL ? reason : "UNKNOWN");
         Serial.flush();
     }
-}
-
-system_mode_t supervisor_get_mode(void) {
-    return current_mode;
 }
 
 system_state_t supervisor_get_state(void) {

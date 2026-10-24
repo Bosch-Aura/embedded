@@ -25,19 +25,18 @@ python3 test/python/test_uart_simulator.py /dev/ttyCH341USB0     # Jetson (drive
 `test/test_uart_simulator.py` (el de la raíz de `test/`) es una versión vieja que manda
 `CONTROL:...`/`LIGHTS:...` y usa 921600 por defecto: usá el de `test/python/`.
 
-El simulador **no manda `M:PING:0`** por su cuenta: escribiendo a mano, al segundo sin comandos
-el watchdog de MANUAL lleva el sistema a `FAULT`. Ver `test/QUICK_UART_TEST.md`.
+El simulador **no manda `M:PING:0`** por su cuenta: escribiendo a mano, a los 300 ms sin comandos
+el watchdog lleva el sistema a `FAULT`. Ver `test/QUICK_UART_TEST.md`.
 
 ### Opción 2: terminal serie
 
 - **Por USB:** 115200 baud, el mismo puerto que usa `pio device monitor`.
 - **Por el UART externo:** adaptador en **GPIO 17 (TX)** y **GPIO 16 (RX)** del ESP32, a **921600 baud**.
-  Por ahí solo vuelven `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`; el resto de la salida sale por USB.
+  Por ahí solo vuelve `EVENT:STATE_CHANGED`; el resto de la salida sale por USB.
 
 ## Quick Test Commands
 
 ```
-M:SYS_MODE:1        # Pasar a AUTO
 M:SYS_ARM:0         # Armar (obligatorio: arranca desarmado)
 C:SET_SPEED:150     # Velocidad (latching: queda sostenida; por debajo de ~140 no arranca)
 C:SET_STEER:105     # Dirección (50 izquierda, 105 centro, 160 derecha)

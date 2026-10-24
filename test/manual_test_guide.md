@@ -4,7 +4,7 @@ This guide helps you manually test the RC car system functionality when automate
 
 > **Actualizado.** Corregido contra el firmware actual: el firmware **no tiene página web ni Wi-Fi**;
 > todo se controla por serie (USB a 115200 o UART externo en GPIO 17/16 a 921600). El watchdog es de
-> 300 ms en AUTO y 1000 ms en MANUAL, el freno tarda hasta ~50 ms y la placa arranca `DISARMED`
+> 300 ms (no hay modos AUTO/MANUAL: eso lo decide la Jetson), el freno tarda hasta ~50 ms y la placa arranca `DISARMED`
 > (solo con `-DBOOT_ARMED`, que hoy no está en `platformio.ini`, arranca `ARMED`/`RUNNING`).
 > Referencia: `docs/BRAIN_TEAM_PROTOCOL.md`.
 
@@ -13,7 +13,7 @@ This guide helps you manually test the RC car system functionality when automate
 - ESP32 board connected via USB
 - Serial monitor open (115200 baud)
 - Para las pruebas con movimiento, un script que mande comandos (por ejemplo `test/python/test_uart_simulator.py`):
-  escribiendo a mano no se llega a alimentar el watchdog (1 s en MANUAL, 300 ms en AUTO)
+  escribiendo a mano no se llega a alimentar el watchdog (300 ms)
 - Optional: UART device (Jetson or serial terminal) on GPIO 17/16. Los comandos también se pueden mandar por el mismo USB.
 - Ningún objeto a menos de 30 cm delante del ultrasonido: si no, el sistema entra en `FAULT` (`EVENT:FAULT_TRIGGERED:ULTRASONIC_OBSTACLE`)
 
@@ -45,7 +45,7 @@ This guide helps you manually test the RC car system functionality when automate
    EVENT:SYSTEM_READY
    ```
    Intercaladas aparecen las líneas `[XxxTask] ... task started` y el estado inicial
-   (`EVENT:STATE_CHANGED:ARMED` con `-DBOOT_ARMED`, `DISARMED` sin él, más `EVENT:MODE_CHANGED:MANUAL`).
+   (`EVENT:STATE_CHANGED:ARMED` con `-DBOOT_ARMED`, `DISARMED` sin él).
    Cada línea llega entera: si ves dos eventos pegados en una línea, la placa tiene un firmware
    anterior a b4acb21.
 
@@ -60,7 +60,7 @@ This guide helps you manually test the RC car system functionality when automate
 **Steps**:
 1. Send `C:SET_SPEED:150`: con la placa desarmada se ignora (`[MotorTask] SET_SPEED ignored - system DISARMED`)
 2. Send `M:SYS_ARM:0`
-3. Verify state changes to `RUNNING` (en MANUAL, `ARMED` pasa solo a `RUNNING`)
+3. Verify state changes to `RUNNING` (`ARMED` pasa solo a `RUNNING`)
 4. Send `M:SYS_DISARM:0` and verify state changes back to `DISARMED`
 
 **Expected Result**: 
@@ -168,56 +168,38 @@ aunque llegue un `C:SET_SPEED` nuevo. El estado no cambia.
 
 ---
 
-### 9. Mode Switching Test
-
-**Objective**: Verify MANUAL ↔ AUTO mode switching
-
-**Steps**:
-1. System in MANUAL mode
-2. Send `M:SYS_MODE:1`
-3. Verify `EVENT:MODE_CHANGED:AUTO`
-4. Send `M:SYS_MODE:0`
-5. Verify `EVENT:MODE_CHANGED:MANUAL`
-
-**Expected Result**: Mode switches correctly. Mandar el modo que ya está solo
-produce `EVENT:CMD_RECEIVED:SYS_MODE:<modo>`.
-
----
-
-### 10. UART Communication Test (AUTO Mode)
+### 9. UART Communication Test
 
 **Objective**: Verify UART communication with Jetson
 
 **Prerequisites**: UART device connected to GPIO 17 (TX) and GPIO 16 (RX) at 921600, o por USB a 115200.
-Usar un script: en AUTO el watchdog salta a los 300 ms sin comandos.
+Usar un script: el watchdog salta a los 300 ms sin comandos.
 
 **Steps**:
-1. Send `M:SYS_MODE:1\n` (AUTO), esperar ~100 ms
-2. Send UART message: `M:SYS_ARM:0\n`
-3. Verify system ARMs (y pasa a RUNNING)
-4. Send: `C:SET_SPEED:150\n`
-5. Verify motor speed changes y se mantiene (latching) mientras se manda `M:PING:0\n` cada 100 ms
-6. Send: `C:SET_STEER:90\n`
-7. Verify steering moves
-8. Send: `E:BRAKE_NOW:0\n`
-9. Verify emergency brake triggers
+1. Send UART message: `M:SYS_ARM:0\n`
+2. Verify system ARMs (y pasa a RUNNING)
+3. Send: `C:SET_SPEED:150\n`
+4. Verify motor speed changes y se mantiene (latching) mientras se manda `M:PING:0\n` cada 100 ms
+5. Send: `C:SET_STEER:90\n`
+6. Verify steering moves
+7. Send: `E:BRAKE_NOW:0\n`
+8. Verify emergency brake triggers
 
 **Expected Result**: All UART commands are parsed and executed correctly
 
 ---
 
-### 11. Watchdog Timeout Test
+### 10. Watchdog Timeout Test
 
-**Objective**: Verify watchdog timeout in AUTO mode
+**Objective**: Verify watchdog timeout
 
 **Steps**:
-1. Set mode to AUTO
-2. ARM the system
-3. Start sending heartbeat messages via UART (`M:PING:0` every 100 ms)
-4. Stop sending messages
-5. Wait > 300 ms (en MANUAL, > 1000 ms)
-6. Verify system enters FAULT state
-7. Verify motor stops and steering centers
+1. ARM the system
+2. Start sending heartbeat messages via UART (`M:PING:0` every 100 ms)
+3. Stop sending messages
+4. Wait > 300 ms
+5. Verify system enters FAULT state
+6. Verify motor stops and steering centers
 
 **Expected Result**: 
 - System detects heartbeat timeout
@@ -237,7 +219,6 @@ Usar un script: en AUTO el watchdog salta a los 300 ms sin comandos.
 - [ ] Lights control (ON/OFF/AUTO)
 - [ ] Emergency brake
 - [ ] E-STOP GPIO
-- [ ] Mode switching
 - [ ] UART communication (if hardware available)
 - [ ] Watchdog timeout
 

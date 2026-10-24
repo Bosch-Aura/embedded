@@ -13,13 +13,11 @@
 
 typedef enum {
     MSG_TYPE_STATUS,
-    MSG_TYPE_STATE_EVENT,
-    MSG_TYPE_MODE_EVENT
+    MSG_TYPE_STATE_EVENT
 } msg_type_t;
 
 typedef struct {
     msg_type_t type;
-    system_mode_t mode;
     system_state_t state;
     uint32_t heartbeat_age_ms;
 } telemetry_msg_t;
@@ -28,7 +26,7 @@ static QueueHandle_t tx_queue = NULL;
 
 // A-5: the queue must exist BEFORE any task can produce into it. Creating it
 // inside link_tx_task() was a race: producers found tx_queue == NULL and dropped
-// the initial STATE_CHANGED / MODE_CHANGED events in silence.
+// the initial STATE_CHANGED event in silence.
 bool link_tx_init(void) {
     tx_queue = xQueueCreate(TX_QUEUE_SIZE, sizeof(telemetry_msg_t));
     if (tx_queue == NULL) {
@@ -63,26 +61,16 @@ void link_tx_task(void *pvParameters) {
                     Serial1.print("\n");
                     Serial1.flush();
                     break;
-                    
-                case MSG_TYPE_MODE_EVENT:
-                    snprintf(buffer, sizeof(buffer), "EVENT:MODE_CHANGED:%s",
-                             msg.mode == MODE_AUTO ? "AUTO" : "MANUAL");
-                    serial_line(buffer);   // Also print to Serial (USB) for dashboard
-                    Serial.flush();        // Ensure it's sent immediately
-                    Serial1.print(buffer); // And to Serial1 (UART)
-                    Serial1.print("\n");
-                    Serial1.flush();
-                    break;
+
             }
         }
     }
 }
 
-void link_tx_send_status(system_mode_t mode, system_state_t state, uint32_t heartbeat_age_ms) {
+void link_tx_send_status(system_state_t state, uint32_t heartbeat_age_ms) {
     if (tx_queue != NULL) {
         telemetry_msg_t msg = {
             .type = MSG_TYPE_STATUS,
-            .mode = mode,
             .state = state,
             .heartbeat_age_ms = heartbeat_age_ms
         };
@@ -94,20 +82,7 @@ void link_tx_send_state_event(system_state_t state) {
     if (tx_queue != NULL) {
         telemetry_msg_t msg = {
             .type = MSG_TYPE_STATE_EVENT,
-            .mode = MODE_MANUAL, // Not used for state events
             .state = state,
-            .heartbeat_age_ms = 0
-        };
-        xQueueSend(tx_queue, &msg, 0); // Non-blocking
-    }
-}
-
-void link_tx_send_mode_event(system_mode_t mode) {
-    if (tx_queue != NULL) {
-        telemetry_msg_t msg = {
-            .type = MSG_TYPE_MODE_EVENT,
-            .mode = mode,
-            .state = STATE_DISARMED, // Not used for mode events
             .heartbeat_age_ms = 0
         };
         xQueueSend(tx_queue, &msg, 0); // Non-blocking
