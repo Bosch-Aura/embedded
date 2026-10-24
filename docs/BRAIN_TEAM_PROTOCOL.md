@@ -540,8 +540,7 @@ el sistema a `FAULT` enseguida. Para probar con el auto andando, usá un script 
 
 - **Brain-Aura** (`src/movement/esp32.py`): se apoya en el *latching* y mantiene el enlace con `M:PING:0` a 10 Hz.
 - **`bfmc_hardware_bridge`** (nodo ROS2 del repo `Bosch-Aura/autonomous-vehicle-BFMC-ros2`): al abrir
-  el puerto configura modo AUTO y arma. **Hay que actualizarlo**: espera `EVENT:MODE_CHANGED` antes
-  de armar y este firmware ya no lo manda; después manda `SET_STEER` + `SET_SPEED` a 20 Hz. Nunca rearma
+  el puerto, y después de cada reinicio de la placa, arma solo (sin mandar ningún modo); después manda `SET_STEER` + `SET_SPEED` a 20 Hz. Nunca rearma
   solo tras un `FAULT`.
 
 ## Soporte
