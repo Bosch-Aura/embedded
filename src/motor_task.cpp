@@ -19,7 +19,7 @@
 #define MOTOR_DIRECTION_DEADTIME_MS 60
 #endif
 
-// Direction the link/web asked for. Owned by MotorTask, which is the only task
+// Direction the link asked for. Owned by MotorTask, which is the only task
 // allowed to touch the H-bridge pins; everyone else goes through
 // motor_set_requested_direction().
 static volatile bool requested_direction = true; // true = forward
@@ -167,8 +167,8 @@ void motor_task(void *pvParameters)
 
                         // BLOQUEANTE-2: honour the requested direction instead
                         // of forcing forward on every 10 ms cycle. Flipping
-                        // IN3/IN4 with PWM applied is plugging: the web UI
-                        // resending "backward" at 10 Hz was inverting the
+                        // IN3/IN4 with PWM applied is plugging: a client
+                        // resending "backward" at 10 Hz would invert the
                         // H-bridge ten times a second under load.
                         const int8_t want_dir = requested_direction ? 1 : 0;
 

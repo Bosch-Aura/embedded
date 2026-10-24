@@ -40,7 +40,7 @@ Para garantizar la seguridad crítica, el sistema implementa un canal de comunic
 
 * **Fuentes de Disparo:**
     * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas; además lleva el sistema a `FAULT`).
-    * **Comandos Externos:** Solicitud de parada inmediata vía UART o Web (Botón de Pánico).
+    * **Comandos Externos:** Solicitud de parada inmediata vía serie (`E:BRAKE_NOW` / `E:STOP`).
     * **Sistema:** Fallos de estado detectados por el Supervisor.
 
 | Característica | Comandos Normales | Emergencia |
@@ -79,7 +79,7 @@ El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gesti
 * **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` → `FAULT`).
 * **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` en modo `MANUAL` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
 * **Un comando a la vez:** el `supervisor_mailbox` tiene un solo lugar y se revisa cada 20 ms; dos comandos de gestión seguidos pueden pisarse. Cada comando se ejecuta una sola vez (por *timestamp*), aunque su TTL sea de 5 s.
-* **Fuentes de Comandos:** `link_rx_task` (UART) y `web_task` (HTTP).
+* **Fuente de Comandos:** `link_rx_task` (USB y UART externo). El firmware no tiene página web ni Wi-Fi.
 
 | Comando | Acción | Transición Típica |
 | :--- | :--- | :--- |
@@ -143,7 +143,6 @@ graph TD
         LGT[LightsTask<br/>Prio: 1]
         RX[LinkRxTask<br/>Prio: 4]
         TX[LinkTxTask<br/>Prio: 2]
-        WEB[WebTask<br/>Prio: 2]
         SUP[SupervisorTask<br/>Prio: 2]
     end
 
@@ -167,7 +166,6 @@ graph TD
     RX ==> MB_STR
     RX ==> MB_LGT
     RX ==> MB_SUP
-    WEB ~~~ MB_SUP
 
     %% Lectura
     MB_MOT -.->|"Lee (10ms)"| MOT
@@ -192,8 +190,8 @@ El sistema utiliza **Multiprocesamiento Asimétrico** sobre los dos núcleos del
 | :--- | :--- | :--- | :--- | :--- |
 | **Core 0** | **Safety & Motion** | `UltrasonicTask` | **Crítica (5)** | **Capa de Seguridad:** Monitoreo de entorno y prevención de colisiones. Máxima prioridad del sistema. |
 | **Core 0** | **Real-Time Control** | `MotorTask`, `SteerTask` | Alta (3-4) | Generación de PWM preciso y bucles de control. Aislado de interrupciones de red. |
-| **Core 1** | **Comms Ingress** | `LinkRxTask` | Alta (4) | Recepción y decodificación de alta velocidad (UART/WiFi). |
-| **Core 1** | **System & I/O** | `WebTask`, `Supervisor`, `LinkTx`, `Lights` | Media/Baja (1-2) | Gestión de pila TCP/IP, telemetría, watchdog y control de iluminación. |
+| **Core 1** | **Comms Ingress** | `LinkRxTask` | Alta (4) | Recepción y decodificación de alta velocidad (USB y UART externo). |
+| **Core 1** | **System & I/O** | `Supervisor`, `LinkTx`, `Lights` | Media/Baja (1-2) | Telemetría, watchdog y control de iluminación. |
 
 ### 5.2 Salida serie compartida
 
@@ -210,7 +208,7 @@ La arquitectura actual (v2.0) proporciona una base sólida y estable. Sin embarg
 ### 6.1 Fortalezas del Diseño Actual
 * **Estabilidad de Carga (Determinismo):** Al utilizar una frecuencia de ejecución fija, el consumo de CPU es constante y predecible. El sistema es inmune a "tormentas de interrupciones" si los sensores envían datos excesivos o ruidosos.
 * **Integridad de Datos:** El patrón de **Mailbox con Mutex** garantiza que las tareas de control siempre accedan a una "foto" coherente y completa del estado (Atomicidad), eliminando condiciones de carrera sobre las variables de control.
-* **Aislamiento de Fallos:** La estrategia de **Core Pinning** ha demostrado ser eficaz para evitar que la latencia variable de la pila WiFi/TCP-IP (Core 1) afecte la generación de señales PWM críticas (Core 0).
+* **Aislamiento de Fallos:** La estrategia de **Core Pinning** ha demostrado ser eficaz para evitar que la latencia variable de las comunicaciones (Core 1) afecte la generación de señales PWM críticas (Core 0).
 * **Seguridad Híbrida:** el sistema es de *polling*. El **Fast-Path de Emergencia** evalúa la notificación al principio del ciclo, pero **no** elude la espera: `ulTaskNotifyTake()` se usa con timeout 0 y el lazo bloquea en `vTaskDelay()`, que las notificaciones no interrumpen. La latencia de parada es de hasta ~50 ms en el peor caso. Implementar A-1 (`docs/PLAN_MEJORAS.md`) la reduciría a <1 ms real.
 
 ### 6.2 Áreas de Optimización

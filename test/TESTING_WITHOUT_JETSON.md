@@ -131,19 +131,6 @@ void loop() {
 }
 ```
 
-### Method 4: Web Interface (MANUAL Mode)
-
-Test MANUAL mode using the web interface (no UART needed):
-
-1. Connect to Wi-Fi AP: `RC-Car-ESP32`
-2. Open browser: `http://192.168.4.1`
-3. Click "ARMAR" button
-4. Use the speed slider (arriba adelante, abajo atrás) and the steering wheel
-5. Check status line for state/mode (`Estado: RUNNING / MANUAL`)
-
-La página manda un latido a 10 Hz mientras está abierta; si se cierra o se cae el Wi-Fi, el
-watchdog de MANUAL lleva el sistema a `FAULT` al segundo.
-
 ## Test Scenarios
 
 ### Scenario 1: Basic UART Communication
@@ -213,9 +200,9 @@ sigue parado hasta un `C:SET_SPEED` nuevo. El estado no cambia.
 2. Switch to AUTO: `M:SYS_MODE:1` (`EVENT:CMD_EXECUTED:SYS_MODE:AUTO` + `EVENT:MODE_CHANGED:AUTO`)
 3. Send UART commands (should work, a 10 Hz)
 4. Switch back: `M:SYS_MODE:0`
-5. Use web interface (should work)
+5. Send UART commands again (should work, al menos 1 por segundo)
 
-**Expected:** Both modes work. Los comandos serie y web se aceptan en los dos modos; lo que cambia
+**Expected:** Both modes work. Los comandos serie se aceptan en los dos modos; lo que cambia
 es el timeout del watchdog y que en AUTO hace falta `RUNNING`. Mandar `M:SYS_MODE` con el modo que
 ya está solo produce `EVENT:CMD_RECEIVED:SYS_MODE:<modo>`.
 
@@ -297,5 +284,5 @@ python3 test/python/test_uart_simulator.py /dev/ttyUSB0
 - **Baud rate:** 921600 en el UART externo, 115200 por USB (los dos aceptan comandos)
 - **Command format:** `CHANNEL:COMMAND[:VALUE]` + newline
 - **Heartbeat:** cualquier comando **válido** lo alimenta (basura no); timeout 300 ms AUTO / 1000 ms MANUAL
-- **Status:** no hay telemetría periódica. Por el UART externo solo salen `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`; todos los eventos salen por USB, y `http://192.168.4.1/status` devuelve modo y estado
+- **Status:** no hay telemetría periódica. Por el UART externo solo salen `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`; todos los eventos salen por USB
 

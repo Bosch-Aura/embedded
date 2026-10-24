@@ -19,7 +19,7 @@ static mailbox_t *steer_mb = NULL;
 
 // MEDIO-3: these are written by SupervisorTask (core 1) and read by
 // motor_control_allowed() from MotorTask (core 0), and last_heartbeat_ms is
-// written from LinkRxTask and WebTask too. Without volatile the compiler is
+// written from LinkRxTask too. Without volatile the compiler is
 // free to hoist the load out of MotorTask's while(1) - which would freeze the
 // traction authorization at whatever value it had on the first iteration.
 static volatile system_mode_t current_mode = MODE_MANUAL;

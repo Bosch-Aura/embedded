@@ -34,12 +34,6 @@ el watchdog de MANUAL lleva el sistema a `FAULT`. Ver `test/QUICK_UART_TEST.md`.
 - **Por el UART externo:** adaptador en **GPIO 17 (TX)** y **GPIO 16 (RX)** del ESP32, a **921600 baud**.
   Por ahí solo vuelven `EVENT:STATE_CHANGED` y `EVENT:MODE_CHANGED`; el resto de la salida sale por USB.
 
-### Opción 3: interfaz web
-
-1. Conectarse al Wi-Fi `RC-Car-ESP32` (abierto)
-2. Abrir `http://192.168.4.1`
-3. Usar ARMAR / DESARMAR / E-STOP, el slider de velocidad y el volante
-
 ## Quick Test Commands
 
 ```

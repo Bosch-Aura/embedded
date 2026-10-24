@@ -186,14 +186,10 @@ void link_rx_task(void *pvParameters) {
                             }
                         } else if (strcmp(cmd, "SET_DIR") == 0) {
                             // C:SET_DIR:<0|1> - sentido de marcha. 1 adelante, 0 atras.
-                            // Hasta ahora el sentido solo se podia cambiar desde la
-                            // pagina web del propio ESP32: por el enlace serie el
-                            // vehiculo iba SIEMPRE hacia adelante, porque C:SET_SPEED
-                            // satura los negativos a 0. El dashboard del Brain tiene
-                            // marcha atras (velocidades negativas) y no hacia nada.
+                            // C:SET_SPEED satura los negativos a 0, asi que el sentido
+                            // va en este comando aparte.
                             //
-                            // No usa mailbox: es una bandera volatil, igual que la que
-                            // usa web_task. MotorTask aplica el cambio en su rama de
+                            // No usa mailbox: es una bandera volatil. MotorTask aplica el cambio en su rama de
                             // CMD_SET_SPEED, que es la que tiene el tiempo muerto que
                             // evita invertir el puente H con corriente, asi que el
                             // emisor debe reenviar SET_SPEED despues de este comando.

@@ -170,13 +170,12 @@ ser.write(command.encode())
 Establece el **sentido de marcha**. No cambia la velocidad.
 
 - **Valor**: `1` = adelante, `0` = atras
-- **TTL**: no tiene. Es una bandera persistente, como en la pagina web del propio ESP32.
+- **TTL**: no tiene. Es una bandera persistente.
 - **Ejemplo**: `C:SET_DIR:0` (marcha atras)
 - **Respuesta**: `EVENT:CMD_RECEIVED:SET_DIR:FORWARD` / `:BACKWARD`
 
-**Por que existe:** `C:SET_SPEED` satura los negativos a 0, asi que por el enlace
-serie el vehiculo iba **siempre hacia adelante**. El sentido solo se podia cambiar
-desde la pagina web del ESP32. Un dashboard con marcha atras mandaba velocidades
+**Por que existe:** `C:SET_SPEED` satura los negativos a 0, asi que sin este
+comando el vehiculo iba **siempre hacia adelante**. Un dashboard con marcha atras mandaba velocidades
 negativas y no pasaba nada.
 
 **No hace falta reenviar `SET_SPEED` despues.** La inversion se aplica sola, aunque
@@ -443,8 +442,8 @@ y no debe parsearse):
 | `EVENT:CMD_EXECUTED:SET_SPEED:<v>` | La velocidad aplicada cambió (valor ya saturado a 0-255) |
 | `EVENT:CMD_EXECUTED:SET_STEER:<v>` | El ángulo aplicado cambió (valor ya saturado a 50-160) |
 | `EVENT:CMD_EXECUTED:SET_STEER_CENTER` | Dirección centrada por `SYS_DISARM`, watchdog o E-STOP |
-| `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` | Se aplicó un freno de emergencia, venga de donde venga: `E:BRAKE_NOW`/`E:STOP`, botón E-STOP de la web, `SYS_DISARM`, watchdog, E-STOP físico o ultrasonido. Arranca el bloqueo de 5 s |
-| `EVENT:CMD_EXECUTED:BRAKE_NOW` | Parada pedida por la web (`/driveStop`); también arranca el bloqueo de 5 s |
+| `EVENT:CMD_EXECUTED:EMERGENCY_BRAKE` | Se aplicó un freno de emergencia, venga de donde venga: `E:BRAKE_NOW`/`E:STOP`, `SYS_DISARM`, watchdog, E-STOP físico o ultrasonido. Arranca el bloqueo de 5 s |
+| `EVENT:CMD_EXECUTED:BRAKE_NOW` | Ya no se emite: solo lo provocaba la página web (`/driveStop`), que se eliminó |
 | `EVENT:CMD_EXECUTED:<SYS_ARM\|SYS_DISARM>` | Comando de armado aplicado (`SYS_ARM` se confirma siempre) |
 | `EVENT:CMD_EXECUTED:SYS_MODE:<AUTO\|MANUAL>` | El modo cambió (no se emite si ya estaba en ese modo) |
 | `EVENT:CMD_EXECUTED:<LIGHTS_ON\|LIGHTS_OFF\|LIGHTS_AUTO>` | El modo de luces cambió |

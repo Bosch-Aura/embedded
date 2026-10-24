@@ -10,7 +10,6 @@
 #include "link_rx_task.h"
 #include "link_tx_task.h"
 #include "supervisor_task.h"
-#include "web_task.h"
 #include "ultrasonic_task.h"
 #include "serial_out.h"
 
@@ -122,20 +121,13 @@ void setup(void)
     // LinkTxTask - Core 1, Priority 2
     create_task_or_die(link_tx_task, "LinkTxTask", STACK_SIZE_4K, NULL, 2, 1);
 
-    // WebTask - Core 1, Priority 2
-    // C-2: static -> the struct must outlive setup()
-    static web_task_params_t web_params = {
-        .motor_mailbox = &motor_mailbox,
-        .steer_mailbox = &steer_mailbox,
-        .lights_mailbox = &lights_mailbox,
-        .supervisor_mailbox = &supervisor_mailbox};
-    create_task_or_die(web_task, "WebTask", STACK_SIZE_8K, &web_params, 2, 1);
-
     // UltrasonicTask - Core 0, Priority 5 (high priority for safety)
     create_task_or_die(ultrasonic_task, "UltrasonicTask", STACK_SIZE_4K, NULL, 5, 0);
 
     serial_line("[main] All tasks created. FreeRTOS scheduler running...");
     serial_line("[main] System ready!");
+    // Built-in LED on: the board booted and every task is running.
+    digitalWrite(GPIO_LED_BUILTIN, HIGH);
     serial_line("EVENT:SYSTEM_READY");
     Serial.flush();
 }
