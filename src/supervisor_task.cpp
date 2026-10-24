@@ -48,6 +48,13 @@ static system_state_t previous_state = STATE_DISARMED;
 #endif
 static volatile uint32_t last_heartbeat_ms = 0;
 
+// STOPPED requests (see supervisor_stop_requested()).
+// stop_latched survives DISARM, FAULT and re-ARM on purpose: an armed car that
+// was told to stop comes back STOPPED, never RUNNING, until M:SYS_RESUME:0.
+// Only a reboot clears it.
+static volatile bool obstacle_active = false;
+static volatile bool stop_latched = false;
+
 // Age of the last heartbeat, or false if none has arrived yet.
 //
 // The age MUST be measured against a clock read AFTER the heartbeat. The loop
@@ -84,10 +91,7 @@ void supervisor_task(void *pvParameters) {
     // nothing to wait for.
 
     // Print initial state at boot
-    serial_linef("EVENT:STATE_CHANGED:%s",
-                 current_state == STATE_DISARMED ? "DISARMED" :
-                   current_state == STATE_ARMED ? "ARMED" :
-                   current_state == STATE_RUNNING ? "RUNNING" : "FAULT");
+    serial_linef("EVENT:STATE_CHANGED:%s", supervisor_state_name(current_state));
     Serial.flush();
     
     // Also send via link_tx for UART transmission
@@ -200,6 +204,21 @@ void supervisor_task(void *pvParameters) {
             serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
             Serial.flush();
         }
+
+        // RUNNING <-> STOPPED follows the stop requests. MotorTask and SteerTask
+        // already hold still as soon as a request appears; this makes it a
+        // state the client can see.
+        const bool stop = supervisor_stop_requested();
+        if (current_state == STATE_RUNNING && stop) {
+            current_state = STATE_STOPPED;
+            serial_linef("EVENT:STATE_AUTO_TRANSITION:RUNNING->STOPPED:%s",
+                         stop_latched ? "SYS_STOP" : "OBSTACLE");
+            Serial.flush();
+        } else if (current_state == STATE_STOPPED && !stop) {
+            current_state = STATE_RUNNING;
+            serial_line("EVENT:STATE_AUTO_TRANSITION:STOPPED->RUNNING");
+            Serial.flush();
+        }
         
         // Send event if state changed (for automatic transitions)
         if (current_state != previous_state) {
@@ -216,6 +235,37 @@ void supervisor_task(void *pvParameters) {
 
 void supervisor_update_heartbeat(void) {
     last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+void supervisor_set_obstacle(bool obstacle) {
+    obstacle_active = obstacle;
+}
+
+// Called only from LinkRxTask, so the read-then-write is not racy.
+bool supervisor_latch_stop(void) {
+    const bool changed = !stop_latched;
+    stop_latched = true;
+    return changed;
+}
+
+bool supervisor_release_stop(void) {
+    const bool changed = stop_latched;
+    stop_latched = false;
+    return changed;
+}
+
+bool supervisor_stop_requested(void) {
+    return obstacle_active || stop_latched;
+}
+
+const char *supervisor_state_name(system_state_t state) {
+    switch (state) {
+        case STATE_DISARMED: return "DISARMED";
+        case STATE_ARMED:    return "ARMED";
+        case STATE_RUNNING:  return "RUNNING";
+        case STATE_STOPPED:  return "STOPPED";
+        default:             return "FAULT";
+    }
 }
 
 system_state_t supervisor_get_state(void) {

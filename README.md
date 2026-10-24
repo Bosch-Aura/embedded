@@ -39,7 +39,7 @@ Para garantizar la seguridad crítica, el sistema implementa un canal de comunic
     3.  **Prioridad de Ejecución:** La lógica de emergencia se evalúa antes que cualquier comando de movimiento estándar. **Latencia real: hasta ~50 ms en el peor caso** (polling de `LinkRxTask` 10 ms + ciclo de `MotorTask` 10 ms + bloqueo de `pulseIn()` del ultrasonido hasta 30 ms). La notificación no interrumpe el `vTaskDelay()` del lazo: ver hallazgos A-1 y A-2 de `docs/PLAN_MEJORAS.md`.
 
 * **Fuentes de Disparo:**
-    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas). **No** usa este camino ni pasa a `FAULT`: frena y mantiene frenado mientras haya obstáculo (`motor_set_obstacle_hold()`), sin cambiar el estado. Ver §3.2.
+    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas). **No** usa este camino ni pasa a `FAULT`: pone el sistema en `STOPPED` mientras haya obstáculo (`supervisor_set_obstacle()`). Ver §3.2.
     * **Comandos Externos:** Solicitud de parada inmediata vía serie (`E:BRAKE_NOW` / `E:STOP`).
     * **Sistema:** Fallos de estado detectados por el Supervisor.
 
@@ -76,7 +76,7 @@ typedef struct {
 ### 3.2 Subsistema de Supervisión (`SupervisorTask`)
 El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gestión del Estado del Sistema**.
 
-* **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` → `FAULT`).
+* **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` ⇄ `STOPPED`, y `FAULT`).
 * **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
 * **Un comando a la vez:** el `supervisor_mailbox` tiene un solo lugar y se revisa cada 20 ms; dos comandos de gestión seguidos pueden pisarse. Cada comando se ejecuta una sola vez (por *timestamp*), aunque su TTL sea de 5 s.
 * **Fuente de Comandos:** `link_rx_task` (USB y UART externo). El firmware no tiene página web ni Wi-Fi.
@@ -85,12 +85,13 @@ El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gesti
 | :--- | :--- | :--- |
 | **CMD_SYS_ARM** | Habilita el sistema y resetea heartbeat. Rechazado si el E-STOP sigue accionado. | `DISARMED`/`FAULT` → `ARMED` |
 | **CMD_SYS_DISARM** | Notifica emergencia a `MotorTask`, centra dirección vía mailbox y deshabilita. | `ANY` → `DISARMED` |
+| **M:SYS_STOP** / **M:SYS_RESUME** | No van por el mailbox: `LinkRxTask` engancha o suelta una bandera (`supervisor_latch_stop()` / `supervisor_release_stop()`). Solo `SYS_RESUME` suelta el stop. | `RUNNING` ⇄ `STOPPED` |
 
 * **Funciones Adicionales:**
     * **Watchdog/Heartbeat:** verifica recepción constante de datos (300 ms, uno solo para cualquier cliente: el firmware no tiene modos de manejo, eso lo decide la Jetson). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
     * **E-STOP Hardware:** Monitoreo directo de pin GPIO para parada de emergencia física.
-    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING`.
-    * **Obstáculos no son `FAULT`:** `UltrasonicTask` frena y mantiene frenado mientras el obstáculo siga (`EVENT:OBSTACLE_DETECTED:<cm>` / `EVENT:OBSTACLE_CLEARED`), sin desarmar ni pasar a `FAULT`. Al frenar se borra la velocidad latcheada: el auto vuelve a andar solo con un `C:SET_SPEED` nuevo, y eso lo decide la Jetson. `FAULT` (watchdog o E-STOP) nunca se borra solo: hace falta `M:SYS_ARM:0`.
+    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING` (o mientras hay un pedido de `STOPPED`).
+    * **`STOPPED`:** estado armado pero quieto: velocidad 0 y servo congelado donde está (no se centra). Se entra por un obstáculo del ultrasonido (`EVENT:OBSTACLE_DETECTED:<cm>`) o por `M:SYS_STOP:0`, que queda **enganchado** hasta `M:SYS_RESUME:0`: ningún otro comando lo suelta, ni siquiera desarmar y volver a armar. Se vuelve solo a `RUNNING` cuando no queda ninguna de las dos causas. `MotorTask` y `SteerTask` consultan `supervisor_stop_requested()` en cada ciclo, así que frenan sin esperar el ciclo del supervisor. Al frenar se borra la velocidad latcheada: el auto vuelve a andar solo con un `C:SET_SPEED` nuevo. `FAULT` (watchdog o E-STOP) nunca se borra solo: hace falta `M:SYS_ARM:0`.
 
 ---
 
@@ -132,13 +133,13 @@ sequenceDiagram
         Consumer->>Consumer: STOP MOTOR
     end
 
-    %% CASO 3: OBSTÁCULO (HOLD, SIN FAULT)
+    %% CASO 3: OBSTÁCULO -> STOPPED (SIN FAULT)
     Safety->>Safety: Obstáculo < 30 cm (3 lecturas)
-    Safety->>Consumer: motor_set_obstacle_hold(true)
-    Note over Consumer: Frena cada ciclo e ignora SET_SPEED, el estado no cambia
+    Safety->>Consumer: supervisor_set_obstacle(true)
+    Note over Consumer: STOPPED: frena, ignora SET_SPEED y SET_STEER
     Safety->>Safety: Despejado: 3 lecturas >= 35 cm o 10 seguidas sin eco
-    Safety->>Consumer: motor_set_obstacle_hold(false)
-    Note over Consumer: Parado hasta un SET_SPEED nuevo
+    Safety->>Consumer: supervisor_set_obstacle(false)
+    Note over Consumer: RUNNING (si no hay SYS_STOP), parado hasta un SET_SPEED nuevo
 ```
 
 ### 4.2 Diagrama de Despliegue

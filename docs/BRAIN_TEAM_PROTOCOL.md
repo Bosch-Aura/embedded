@@ -36,6 +36,7 @@ mejor, esperá el `EVENT:` de confirmación del anterior.
 
 **Cuándo se obedecen los comandos de control (SET_SPEED, SET_STEER):**
 - En `ARMED` o `RUNNING` (y `ARMED` pasa solo a `RUNNING`).
+- En `STOPPED` se ignoran: velocidad 0 y servo quieto (ver §STOPPED).
 - En `DISARMED` o `FAULT` se ignoran **en silencio**: no hay `EVENT:` de rechazo, solo una línea de depuración `[MotorTask] SET_SPEED ignored - system DISARMED` / `[SteerTask] SET_STEER ignored ...`.
 
 ## Formato de Comandos
@@ -241,6 +242,26 @@ Arma el sistema. Con la compilación actual la placa arranca desarmada, así que
 - **Respuesta**: `EVENT:CMD_RECEIVED:SYS_ARM` y `EVENT:CMD_EXECUTED:SYS_ARM` (este último se emite siempre, incluso si ya estaba armado). Si hubo cambio de estado, además `EVENT:STATE_CHANGED:ARMED` (y en seguida `RUNNING`).
 - **Rechazo**: `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE` si el E-STOP físico sigue accionado
 
+#### `M:SYS_STOP:0`
+Deja el vehículo en **`STOPPED`**: velocidad 0 y servo congelado donde está (no se centra).
+Se manda **una sola vez**: queda enganchado.
+
+- **Lo único que lo suelta es `M:SYS_RESUME:0`.** `SET_SPEED`, `SET_STEER`, `SYS_ARM` y
+  `SYS_DISARM` no lo sueltan: si se desarma y se vuelve a armar, el sistema vuelve a `STOPPED`.
+  Solo un reinicio de la placa lo borra.
+- Sigue armado: no hay que rearmar y no hay bloqueo de 5 s. El watchdog sigue activo, así que hay
+  que mantener el enlace (`M:PING:0`).
+- **Respuesta**: `EVENT:CMD_RECEIVED:SYS_STOP`, `EVENT:CMD_EXECUTED:SYS_STOP` (solo si no estaba
+  enganchado) y `EVENT:STATE_CHANGED:STOPPED`.
+
+#### `M:SYS_RESUME:0`
+Suelta el `SYS_STOP`. Si no hay obstáculo, el sistema vuelve a `RUNNING`; si lo hay, sigue en
+`STOPPED` hasta que se despeje. Nada latcheado se retoma: el auto anda de nuevo con el próximo
+`C:SET_SPEED` (y la dirección con el próximo `C:SET_STEER`).
+
+- **Respuesta**: `EVENT:CMD_RECEIVED:SYS_RESUME`, `EVENT:CMD_EXECUTED:SYS_RESUME` (solo si estaba
+  enganchado) y `EVENT:STATE_CHANGED:RUNNING`.
+
 #### `M:SYS_DISARM:0`
 Desarma el sistema (modo seguro). Detiene el vehículo inmediatamente.
 
@@ -409,8 +430,11 @@ y no debe parsearse):
 | Evento | Cuándo |
 |---|---|
 | `EVENT:SYSTEM_READY` | Fin de `setup()`, todas las tareas creadas |
-| `EVENT:STATE_CHANGED:<DISARMED\|ARMED\|RUNNING\|FAULT>` | Cambio de estado. Al arrancar se informa el estado inicial (puede llegar dos veces y antes o después de `SYSTEM_READY`) |
+| `EVENT:STATE_CHANGED:<DISARMED\|ARMED\|RUNNING\|STOPPED\|FAULT>` | Cambio de estado. Al arrancar se informa el estado inicial (puede llegar dos veces y antes o después de `SYSTEM_READY`) |
 | `EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING` | Transición automática |
+| `EVENT:STATE_AUTO_TRANSITION:RUNNING->STOPPED:<SYS_STOP\|OBSTACLE>` | Entra en `STOPPED`, con la causa |
+| `EVENT:STATE_AUTO_TRANSITION:STOPPED->RUNNING` | Ya no hay `SYS_STOP` ni obstáculo |
+| `EVENT:CMD_RECEIVED:<SYS_STOP\|SYS_RESUME>` / `EVENT:CMD_EXECUTED:<SYS_STOP\|SYS_RESUME>` | Comando de stop recibido / el enganche cambió |
 | `EVENT:CMD_RECEIVED:SET_SPEED:<v>` | Cada `C:SET_SPEED` recibido (valor tal como llegó), aunque después se ignore |
 | `EVENT:CMD_RECEIVED:SET_STEER:<v>` | Cada `C:SET_STEER` recibido |
 | `EVENT:CMD_RECEIVED:SET_DIR:<FORWARD\|BACKWARD>` | Cada `C:SET_DIR` recibido |
@@ -428,8 +452,8 @@ y no debe parsearse):
 | `EVENT:ESTOP_TRIGGERED:GPIO` | E-STOP físico accionado |
 | `EVENT:ESTOP_RELEASED` | E-STOP físico liberado |
 | `EVENT:WATCHDOG_TIMEOUT` | Pérdida de enlace |
-| `EVENT:OBSTACLE_DETECTED:<cm>` | Obstáculo a < 30 cm en 3 lecturas válidas (las lecturas sin eco no cortan la cuenta; ~0,2-1 s). El motor frena y queda frenado; **el estado no cambia** (sigue `RUNNING`) y no hay bloqueo de 5 s |
-| `EVENT:OBSTACLE_CLEARED` | 3 lecturas a ≥ 35 cm, o 10 seguidas sin eco (~0,8 s). Se suelta el freno, pero el auto sigue parado hasta un `C:SET_SPEED` nuevo |
+| `EVENT:OBSTACLE_DETECTED:<cm>` | Obstáculo a < 30 cm en 3 lecturas válidas (las lecturas sin eco no cortan la cuenta; ~0,2-1 s). El sistema pasa a `STOPPED` (frena, servo quieto); no hay `FAULT` ni bloqueo de 5 s |
+| `EVENT:OBSTACLE_CLEARED` | 3 lecturas a ≥ 35 cm, o 10 seguidas sin eco (~0,8 s). Vuelve a `RUNNING` si no hay `SYS_STOP`; el auto sigue parado hasta un `C:SET_SPEED` nuevo |
 | `EVENT:FATAL:TASK_CREATE_FAILED:<tarea>` | Fallo de arranque; el equipo reinicia |
 | `EVENT:FATAL:MAILBOX_INIT_FAILED` | Fallo de arranque; el equipo reinicia |
 | `EVENT:FATAL:TX_QUEUE_CREATE_FAILED` | Fallo de arranque; el equipo reinicia |
@@ -476,19 +500,31 @@ tras un FAULT (ver §Clientes conocidos).
 conservadora. Tras un frenado de emergencia hay un **bloqueo de 5 s** durante el cual
 el motor no responde aunque el sistema esté armado.
 
+### STOPPED
+
+`STOPPED` es un estado **armado pero quieto**: velocidad 0, el servo congelado donde estaba (no se
+centra) y `C:SET_SPEED` / `C:SET_STEER` ignorados. No es una falla: no hay bloqueo de 5 s y no
+hay que rearmar. Se entra por cualquiera de estas dos causas y se vuelve solo a `RUNNING` cuando
+no queda ninguna:
+
+- **`M:SYS_STOP:0`**, enganchado hasta `M:SYS_RESUME:0` (ver §Comandos).
+- **Un obstáculo del ultrasonido**, mientras esté ahí (ver §Obstáculos).
+
+El watchdog sigue activo en `STOPPED`: si se corta el enlace, pasa a `FAULT`.
+
 ### Obstáculos
 
 El ultrasonido está siempre activo. Con 3 lecturas válidas a menos de 30 cm
-llega `EVENT:OBSTACLE_DETECTED:<cm>` y el motor **frena y se queda frenado** mientras el obstáculo
-siga ahí: los `C:SET_SPEED` se ignoran. **No desarma ni pasa a `FAULT`**: el estado sigue en
-`RUNNING`, no hay bloqueo de 5 s y no hay que rearmar. La dirección no se toca.
+llega `EVENT:OBSTACLE_DETECTED:<cm>` y el sistema pasa a **`STOPPED`** mientras el obstáculo
+siga ahí. **No desarma ni pasa a `FAULT`**.
 
 **Lecturas sin eco.** El sensor devuelve 0 tanto con el camino libre (nada en ~4 m) como con un
 objeto muy cerca: con un obstáculo real a 6 cm leía 6 una vez cada cuatro y 0 el resto. Por eso
 un 0 suelto no cuenta ni como obstáculo ni como libre; antes reiniciaba la cuenta y el auto **no
 frenaba** con ese obstáculo.
 
-Cuando hay 3 lecturas a 35 cm o más, o 10 seguidas sin eco (~0,8 s), llega `EVENT:OBSTACLE_CLEARED`. Durante el
+Cuando hay 3 lecturas a 35 cm o más, o 10 seguidas sin eco (~0,8 s), llega `EVENT:OBSTACLE_CLEARED`
+y, si no hay un `SYS_STOP` enganchado, el sistema vuelve a `RUNNING`. Durante el
 frenado se borró la velocidad latcheada, así que **el auto no arranca solo**: vuelve a andar con el
 próximo `C:SET_SPEED`. Un cliente que manda la velocidad en cada ciclo (como `bfmc_hardware_bridge`)
 sigue enseguida; uno que la manda una sola vez (latching) tiene que volver a mandarla. Seguir o no

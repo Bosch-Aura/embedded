@@ -1,6 +1,6 @@
 #include "ultrasonic_task.h"
 #include "hardware.h"
-#include "motor_task.h"
+#include "supervisor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "serial_out.h"
@@ -28,8 +28,8 @@
 #define ULTRASONIC_NO_ECHO_CLEAR_COUNT 10
 #endif
 
-// An obstacle brakes and HOLDS the vehicle while it is there; it does not
-// latch FAULT and does not disarm. FAULT made sense as a last resort, but an
+// An obstacle puts the system in STOPPED while it is there: speed 0 and the
+// servo frozen. It does not latch FAULT and does not disarm. FAULT made sense as a last resort, but an
 // obstacle ahead is a normal driving situation (the car in front, a pedestrian,
 // parking): with FAULT the vehicle stayed dead until someone re-armed it by
 // hand. Whether to drive on once the way is clear is the Jetson's decision: the
@@ -61,7 +61,7 @@ void ultrasonic_task(void *pvParameters) {
                     obstacle = true;
                     near_count = 0;
                     far_count = 0;
-                    motor_set_obstacle_hold(true);
+                    supervisor_set_obstacle(true);
                     serial_linef("EVENT:OBSTACLE_DETECTED:%u", (unsigned)distance_cm);
                     Serial.flush();
                 }
@@ -80,7 +80,7 @@ void ultrasonic_task(void *pvParameters) {
                 obstacle = false;
                 far_count = 0;
                 near_count = 0;
-                motor_set_obstacle_hold(false);
+                supervisor_set_obstacle(false);
                 serial_line("EVENT:OBSTACLE_CLEARED");
                 Serial.flush();
             }

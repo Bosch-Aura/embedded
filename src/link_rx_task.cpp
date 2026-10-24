@@ -209,6 +209,25 @@ void link_rx_task(void *pvParameters) {
                         // watchdog via command_dispatched below.
                         if (strcmp(cmd, "PING") == 0) {
                             command_dispatched = true;
+                        } else if (strcmp(cmd, "SYS_STOP") == 0) {
+                            // M:SYS_STOP:0 - latch STOPPED (speed 0, servo frozen).
+                            // Sent once; only M:SYS_RESUME:0 releases it. No mailbox:
+                            // a flag cannot be overwritten by the next M: command.
+                            serial_line("EVENT:CMD_RECEIVED:SYS_STOP");
+                            if (supervisor_latch_stop()) {
+                                serial_line("EVENT:CMD_EXECUTED:SYS_STOP");
+                            }
+                            command_dispatched = true;
+                        } else if (strcmp(cmd, "SYS_RESUME") == 0) {
+                            // M:SYS_RESUME:0 - release the SYS_STOP latch. With an
+                            // obstacle still ahead the system stays STOPPED until it
+                            // clears. Nothing latched is resumed: the car moves again
+                            // only with a new C:SET_SPEED.
+                            serial_line("EVENT:CMD_RECEIVED:SYS_RESUME");
+                            if (supervisor_release_stop()) {
+                                serial_line("EVENT:CMD_EXECUTED:SYS_RESUME");
+                            }
+                            command_dispatched = true;
                         } else if (strcmp(cmd, "SYS_ARM") == 0) {
                             if (supervisor_mb != NULL) {
                                 serial_line("EVENT:CMD_RECEIVED:SYS_ARM");

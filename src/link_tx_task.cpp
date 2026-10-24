@@ -1,6 +1,7 @@
 #include "link_tx_task.h"
 #include "hardware.h"
 #include "messages.h"
+#include "supervisor_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -52,9 +53,7 @@ void link_tx_task(void *pvParameters) {
                     
                 case MSG_TYPE_STATE_EVENT:
                     snprintf(buffer, sizeof(buffer), "EVENT:STATE_CHANGED:%s",
-                             msg.state == STATE_DISARMED ? "DISARMED" :
-                             msg.state == STATE_ARMED ? "ARMED" :
-                             msg.state == STATE_RUNNING ? "RUNNING" : "FAULT");
+                             supervisor_state_name(msg.state));
                     serial_line(buffer);   // Also print to Serial (USB) for dashboard
                     Serial.flush();        // Ensure it's sent immediately
                     Serial1.print(buffer); // And to Serial1 (UART)

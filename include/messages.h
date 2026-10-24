@@ -38,7 +38,11 @@ typedef enum {
     STATE_DISARMED,
     STATE_ARMED,
     STATE_RUNNING,
-    STATE_FAULT
+    STATE_FAULT,
+    // Armed but held still: speed 0 and the servo frozen where it is, while an
+    // obstacle is ahead or after M:SYS_STOP:0 (latched until M:SYS_RESUME:0).
+    // Returns to RUNNING by itself when neither is active; no re-arm needed.
+    STATE_STOPPED
 } system_state_t;
 
 // UART channel prefixes

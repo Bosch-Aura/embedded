@@ -17,12 +17,6 @@ void motor_task_trigger_emergency(void);
 // reversed while energised. Callers must NOT call motor_set_direction().
 void motor_set_requested_direction(bool forward);
 
-// Obstacle hold, set by UltrasonicTask. While it is on, MotorTask brakes every
-// cycle and ignores SET_SPEED; the system state does not change. Turning it off
-// does not restart the motor: the latched speed is cleared while braking, so
-// the vehicle moves again only with a new C:SET_SPEED.
-void motor_set_obstacle_hold(bool hold);
-
 #ifdef __cplusplus
 }
 #endif
