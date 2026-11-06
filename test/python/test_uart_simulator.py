@@ -2,6 +2,7 @@
 import sys
 import time
 import argparse
+import threading
 from typing import List
 
 try:
@@ -14,17 +15,35 @@ except ImportError:
 
 HELP_TEXT = """
 Commands (type and press Enter):
-  speed <0-255>       Set motor speed (C:SET_SPEED)
-  steer <50-160>      Set steering angle (C:SET_STEER) - 50=right, 105=center, 160=left
-  lights <off|on|auto>  Set lights mode (not handled over UART by firmware)
-  emergency           Trigger emergency brake (E:BRAKE_NOW)
-  stop                Alias for speed 0
   arm                 Arm the system (M:SYS_ARM) - REQUIRED before control commands
   disarm              Disarm the system (M:SYS_DISARM)
+  speed <0-255>       Set motor speed (C:SET_SPEED), latched. Below ~140 the motor does not start
+  dir <fwd|back>      Direction (C:SET_DIR)
+  steer <50-160>      Steering (C:SET_STEER), 105 = center
+  emergency           One-shot brake (E:BRAKE_NOW)
+  sysstop / resume    Latched stop / release it (M:SYS_STOP / M:SYS_RESUME)
+  obstaclereset       Release an ultrasonic hold (M:OBSTACLE_RESET)
   demo                Send a short demo sequence
   help                Show this help
   quit / exit         Leave the simulator
+Any line containing ':' is sent as-is (e.g. C:SET_SPEED:180).
+M:PING:0 is sent at 20 Hz in the background so the 300 ms watchdog does not trip
+(disable with --no-ping).
 """.strip()
+
+_write_lock = threading.Lock()
+
+
+def start_heartbeat(ser: serial.Serial, period_s: float = 0.05) -> None:
+    """Keep the ESP32 link watchdog fed while the user types."""
+    def run():
+        while ser.is_open:
+            try:
+                write_line(ser, "M:PING:0")
+            except serial.SerialException:
+                return
+            time.sleep(period_s)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def select_port_interactive() -> str:
@@ -70,8 +89,9 @@ def write_line(ser: serial.Serial, msg: str) -> None:
         raise serial.SerialException("Serial port is not open")
     line = (msg.strip() + "\n").encode("utf-8")
     try:
-        ser.write(line)
-        ser.flush()
+        with _write_lock:
+            ser.write(line)
+            ser.flush()
     except serial.SerialTimeoutException:
         print("Warning: Write timeout - command may not have been sent", file=sys.stderr)
     except serial.SerialException as e:
@@ -117,17 +137,6 @@ def read_available(ser: serial.Serial, timeout: float = 0.5, max_lines: int = 50
     return lines
 
 
-def to_mode(value: str) -> int:
-    v = value.lower()
-    if v in ("off", "0"):
-        return 0
-    if v in ("on", "1"):
-        return 1
-    if v in ("auto", "2"):
-        return 2
-    raise ValueError("lights mode must be off|on|auto")
-
-
 def run_demo(ser: serial.Serial, delay_s: float = 0.02) -> None:
     """
     Demo: Simulate zigzag pattern
@@ -138,7 +147,7 @@ def run_demo(ser: serial.Serial, delay_s: float = 0.02) -> None:
     """
     print("Starting zigzag demo...")
     
-    # Arm the system (ARMED transitions to RUNNING automatically)
+    # Arm the system (DISARMED -> RUNNING)
     print("-> M:SYS_ARM:0")
     write_line(ser, "M:SYS_ARM:0")
     time.sleep(delay_s * 2)
@@ -148,10 +157,10 @@ def run_demo(ser: serial.Serial, delay_s: float = 0.02) -> None:
     write_line(ser, "C:SET_SPEED:255")
     time.sleep(delay_s)
     
-    # Steering angles (matching hardware.h: 50=right, 105=center, 160=left)
+    # Steering range from include/hardware.h (which side is which depends on the mounting)
     SERVO_CENTER = 105
-    SERVO_RIGHT = 50   # Right turn (lower value)
-    SERVO_LEFT = 160   # Left turn (higher value)
+    SERVO_RIGHT = 50
+    SERVO_LEFT = 160
     
     # Zigzag pattern: left -> right -> left -> right (faster)
     print("Performing zigzag pattern...")
@@ -243,27 +252,29 @@ def interactive_loop(ser: serial.Serial) -> None:
                 write_line(ser, msg)
             elif cmd == "steer":
                 if len(parts) != 2:
-                    print("Usage: steer <50-160> (50=right, 105=center, 160=left)")
+                    print("Usage: steer <50-160> (105 = center)")
                     continue
                 val = int(parts[1])
                 if not (50 <= val <= 160):
-                    print("Value must be 50..160 (50=right, 105=center, 160=left)")
+                    print("Value must be 50..160 (105 = center)")
                     continue
                 msg = f"C:SET_STEER:{val}"
                 print(f"-> {msg}")
                 write_line(ser, msg)
-            elif cmd == "lights":
-                if len(parts) != 2:
-                    print("Usage: lights <off|on|auto>")
+            elif cmd == "dir":
+                if len(parts) != 2 or parts[1].lower() not in ("fwd", "back"):
+                    print("Usage: dir <fwd|back>")
                     continue
-                mode = to_mode(parts[1])
-                print("(note) Lights over UART not handled by firmware; command skipped")
-            elif cmd == "emergency":
-                msg = "E:BRAKE_NOW:0"
+                msg = f"C:SET_DIR:{1 if parts[1].lower() == 'fwd' else 0}"
                 print(f"-> {msg}")
                 write_line(ser, msg)
-            elif cmd == "stop":
-                msg = "C:SET_SPEED:0"
+            elif cmd in ("sysstop", "resume", "obstaclereset"):
+                msg = {"sysstop": "M:SYS_STOP:0", "resume": "M:SYS_RESUME:0",
+                       "obstaclereset": "M:OBSTACLE_RESET:0"}[cmd]
+                print(f"-> {msg}")
+                write_line(ser, msg)
+            elif cmd == "emergency":
+                msg = "E:BRAKE_NOW:0"
                 print(f"-> {msg}")
                 write_line(ser, msg)
             elif cmd == "arm":
@@ -341,6 +352,7 @@ def main() -> None:
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200 for USB; use 921600 for Serial1)")
     parser.add_argument("--sleep", type=float, default=0.05, help="Delay between commands in seconds")
     parser.add_argument("--non-interactive", action="store_true", help="Do not run REPL; just send provided commands")
+    parser.add_argument("--no-ping", action="store_true", help="Do not send M:PING:0 in the background")
     args = parser.parse_args()
 
     port = args.port or select_port_interactive()
@@ -351,6 +363,8 @@ def main() -> None:
 
     try:
         ser = open_serial(port, args.baud)
+        if not args.no_ping:
+            start_heartbeat(ser)
         try:
             interactive_loop(ser)
         finally:

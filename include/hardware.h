@@ -39,15 +39,6 @@ extern "C"
 #ifndef GPIO_SERVO
 #define GPIO_SERVO 25
 #endif
-#ifndef GPIO_HEADLIGHTS
-#define GPIO_HEADLIGHTS 32
-#endif
-#ifndef GPIO_REVERSE_LIGHTS
-#define GPIO_REVERSE_LIGHTS 33
-#endif
-#ifndef GPIO_LDR
-#define GPIO_LDR 35
-#endif
 #ifndef GPIO_ESTOP
 #define GPIO_ESTOP 4
 #endif
@@ -81,11 +72,14 @@ extern "C"
 #define MOTOR_SPEED_MAX 255
 #endif
 
-// UART configuration
+// Serial configuration: USB (debug + bench testing) and UART to the Jetson
+#ifndef SERIAL_BAUD
+#define SERIAL_BAUD 115200
+#endif
 #ifndef UART_BAUD_RATE
 #define UART_BAUD_RATE 921600
 #endif
-// A-11: GPIO 9/10 are wired to the module's internal SPI flash (SD_DATA2/SD_DATA3)
+// GPIO 9/10 are wired to the module's internal SPI flash (SD_DATA2/SD_DATA3)
 // on the ESP32-WROOM-32 and are not even exposed on the DevKit v1 header.
 // 16/17 are the standard free choice on this board.
 // NOTE: on ESP32-WROVER modules GPIO 16/17 are taken by the PSRAM - if the board
@@ -100,11 +94,6 @@ extern "C"
 #define UART_BUF_SIZE 1024
 #endif
 
-// LDR threshold
-#ifndef LDR_THRESHOLD
-#define LDR_THRESHOLD 3500
-#endif
-
 // Ultrasonic sensor (HC-SR04) configuration
 #ifndef ULTRASONIC_MAX_DISTANCE_CM
 #define ULTRASONIC_MAX_DISTANCE_CM 400      // Maximum range ~4m
@@ -116,14 +105,10 @@ extern "C"
 #define ULTRASONIC_OBSTACLE_THRESHOLD_CM 30 // Trigger emergency if object closer than 30cm
 #endif
 
-// Link timing - single source of truth (A-3).
-// The hierarchy that must always hold is:
-//   emission period  <  control command TTL  <  watchdog timeout
+// Link timing. The Jetson must send something (M:PING:0 at least) more often
+// than the watchdog, or the car goes to FAULT.
 #ifndef LINK_EXPECTED_PERIOD_MS
 #define LINK_EXPECTED_PERIOD_MS 100                      // 10 Hz, what we recommend to the Brain team
-#endif
-#ifndef CONTROL_CMD_TTL_MS
-#define CONTROL_CMD_TTL_MS (LINK_EXPECTED_PERIOD_MS * 2) // 200 ms
 #endif
 // The firmware has no driving modes (autonomous / manual is the Jetson's
 // business), so there is a single watchdog for every client.
@@ -133,15 +118,13 @@ extern "C"
 #define WATCHDOG_TIMEOUT_MS WATCHDOG_TIMEOUT_AUTO_MS
 #endif
 #ifndef WATCHDOG_TIMEOUT_MS
-#define WATCHDOG_TIMEOUT_MS (LINK_EXPECTED_PERIOD_MS * 3) // 300 ms, always > TTL
+#define WATCHDOG_TIMEOUT_MS (LINK_EXPECTED_PERIOD_MS * 3) // 300 ms
 #endif
 
-// La jerarquia de arriba deja de ser un comentario y pasa a comprobarse.
-// Si hardware.env pone un watchdog por debajo del TTL, el enlace entra en
-// FAULT en cada ciclo y el auto no se mueve: mejor no compilar que salir a
-// buscar eso con el auto en el piso.
-#if WATCHDOG_TIMEOUT_MS <= CONTROL_CMD_TTL_MS
-#error "WATCHDOG_TIMEOUT_MS debe ser > CONTROL_CMD_TTL_MS (revisa el watchdog en hardware.env)"
+// Si hardware.env pone un watchdog por debajo del periodo de envio, el enlace
+// entra en FAULT en cada ciclo y el auto no se mueve: mejor no compilar.
+#if WATCHDOG_TIMEOUT_MS <= LINK_EXPECTED_PERIOD_MS
+#error "WATCHDOG_TIMEOUT_MS debe ser > LINK_EXPECTED_PERIOD_MS (revisa el watchdog en hardware.env)"
 #endif
 
 // Los topes del servo tienen que ser coherentes o la direccion queda invertida
@@ -160,13 +143,6 @@ extern "C"
 
     // Steering control
     void steer_set_angle(uint16_t angle);
-
-    // Lights control
-    void lights_set_headlights(bool on);
-    void lights_set_reverse(bool on);
-
-    // LDR reading
-    uint16_t ldr_read(void);
 
     // E-STOP GPIO reading
     bool estop_is_triggered(void);

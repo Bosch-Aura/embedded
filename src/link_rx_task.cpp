@@ -1,291 +1,183 @@
 #include "link_rx_task.h"
+#include "control_task.h"
 #include "hardware.h"
-#include "mailbox.h"
 #include "messages.h"
-#include "motor_task.h"
+#include "serial_out.h"
 #include "supervisor_task.h"
+#include "ultrasonic_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "serial_out.h"
 #include <Arduino.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define UART_RX_TIMEOUT_MS 100
+#define LINK_RX_POLL_MS 10
 
-static mailbox_t *motor_mb = NULL;
-static mailbox_t *steer_mb = NULL;
-static mailbox_t *lights_mb = NULL;
-static mailbox_t *supervisor_mb = NULL;
-
-// Parse UART message format: CHANNEL:COMMAND[:VALUE]
-// M-14: works on a stack buffer, no strdup/malloc in the hot path (this is the
-// task that also handles the emergency brake).
-// A-9: returns the value both as raw text and as integer, so callers can tell
-// text from a number instead of silently getting atoi("AUTO") == 0.
-static bool parse_uart_message(const char *msg, char *channel, char *cmd,
-                               char *value_str, size_t value_str_len, int32_t *value) {
-    char buf[UART_BUF_SIZE];
-    size_t n = strlen(msg);
-    if (n == 0 || n >= sizeof(buf)) {
-        return false;
-    }
-    memcpy(buf, msg, n + 1);
-
-    // Remove newline/carriage return
-    char *p = strchr(buf, '\n');
-    if (p) *p = '\0';
-    p = strchr(buf, '\r');
-    if (p) *p = '\0';
-
-    // Parse channel (single character)
-    if (strlen(buf) < 3) {
-        return false;
-    }
-    *channel = buf[0];
-
-    // Find command start
-    char *cmd_start = strchr(buf, ':');
-    if (cmd_start == NULL) {
-        return false;
-    }
-    cmd_start++;
-
-    // Find value separator
-    char *value_start = strchr(cmd_start, ':');
-    if (value_start != NULL) {
-        *value_start = '\0';
-        value_start++;
-        *value = atoi(value_start);
-        strncpy(value_str, value_start, value_str_len - 1);
-        value_str[value_str_len - 1] = '\0';
-    } else {
-        *value = 0;
-        value_str[0] = '\0';
-    }
-
-    strncpy(cmd, cmd_start, 32);
-    cmd[31] = '\0';
-
-    return true;
-}
-
-// A-6: line accumulator with state that PERSISTS across polls.
-// The previous version returned whatever bytes happened to have arrived, so a
-// message split across two polls (very likely at 921600 baud with a 10 ms poll)
-// was silently mangled into two unparseable fragments.
+// Line accumulator whose state PERSISTS across polls: at 921600 baud a line is
+// often split between two polls, and parsing whatever happened to arrive
+// mangles it into two fragments.
 typedef struct {
     char buf[UART_BUF_SIZE];
-    int  len;
-    bool overflowed; // MEDIO-6: discarding the rest of an over-long line
+    int len;
+    bool overflowed; // swallowing the rest of an over-long line
 } line_accum_t;
 
-// Returns true and leaves a complete line (terminator stripped) in acc->buf
-static bool read_line_accum(Stream &stream, line_accum_t *acc) {
-    while (stream.available() > 0) {
-        char c = (char)stream.read();
-        if (c == '\n' || c == '\r') {
-            if (acc->overflowed) {
-                // MEDIO-6: end of the over-long line. Drop it whole and resync.
-                acc->overflowed = false;
-                acc->len = 0;
-                continue;
-            }
-            if (acc->len == 0) {
-                continue; // ignore stray terminators / empty lines
-            }
+// Returns true with a complete line (terminator stripped) in acc->buf.
+static bool read_line(Stream &stream, line_accum_t *acc)
+{
+    while (stream.available() > 0)
+    {
+        const char c = (char)stream.read();
+        if (c == '\n' || c == '\r')
+        {
+            const bool complete = !acc->overflowed && acc->len > 0;
             acc->buf[acc->len] = '\0';
             acc->len = 0;
-            return true; // complete line
+            acc->overflowed = false;
+            if (complete)
+            {
+                return true;
+            }
+            continue; // empty line, or the end of an over-long one: drop it
         }
-        if (acc->overflowed) {
-            continue; // still swallowing the over-long line
+        if (acc->overflowed)
+        {
+            continue;
         }
-        if (acc->len < (int)sizeof(acc->buf) - 1) {
+        if (acc->len < (int)sizeof(acc->buf) - 1)
+        {
             acc->buf[acc->len++] = c;
-        } else {
-            // MEDIO-6: log ONCE and discard until the next terminator. The old
-            // code printed per byte (a blocking Serial write inside a priority-4
-            // task) and reset len, so the tail of the long line was re-parsed as
-            // if it were a fresh command.
+        }
+        else
+        {
+            // Log once and drop the WHOLE line, so its tail is not parsed as
+            // a fresh command.
             acc->overflowed = true;
             acc->len = 0;
-            serial_line("[LinkRxTask] Line overflow, discarding until end of line");
+            log_line("[LinkRx] line overflow, discarding until end of line");
         }
     }
-    return false; // still incomplete, keep the bytes for the next poll
+    return false;
 }
 
-void link_rx_task(void *pvParameters) {
-    link_rx_params_t *params = (link_rx_params_t *)pvParameters;
-    motor_mb = params->motor_mailbox;
-    steer_mb = params->steer_mailbox;
-    lights_mb = params->lights_mailbox;
-    supervisor_mb = params->supervisor_mailbox;
-    
-    // A-6: one accumulator per stream. They must not be shared, or a partial
-    // line on one link would be corrupted by bytes from the other.
+// Parses "<CH>:<CMD>[:<VALUE>]" in place and runs it. Returns true if the
+// command was understood: only those feed the watchdog, a stream of garbage
+// must not keep the link "alive".
+static bool dispatch(char *line)
+{
+    if (strlen(line) < 3 || line[1] != ':')
+    {
+        return false;
+    }
+    const char channel = line[0];
+    char *cmd = line + 2;
+    char *sep = strchr(cmd, ':');
+    int32_t value = 0;
+    if (sep != NULL)
+    {
+        *sep = '\0';
+        value = atoi(sep + 1);
+    }
+
+    switch (channel)
+    {
+    case CHANNEL_EMERGENCY:
+        if (strcmp(cmd, "BRAKE_NOW") == 0 || strcmp(cmd, "STOP") == 0)
+        {
+            control_brake();
+            return true;
+        }
+        break;
+
+    case CHANNEL_CONTROL:
+        if (strcmp(cmd, "SET_SPEED") == 0)
+        {
+            control_set_speed(value);
+            return true;
+        }
+        if (strcmp(cmd, "SET_STEER") == 0)
+        {
+            control_set_steer(value);
+            return true;
+        }
+        if (strcmp(cmd, "SET_DIR") == 0) // 1 forward, 0 backward
+        {
+            control_set_direction(value != 0);
+            return true;
+        }
+        break;
+
+    case CHANNEL_MANAGEMENT:
+        if (strcmp(cmd, "PING") == 0) // liveness only
+        {
+            return true;
+        }
+        if (strcmp(cmd, "SYS_ARM") == 0)
+        {
+            supervisor_request_arm();
+            return true;
+        }
+        if (strcmp(cmd, "SYS_DISARM") == 0)
+        {
+            supervisor_request_disarm();
+            return true;
+        }
+        if (strcmp(cmd, "SYS_STOP") == 0)
+        {
+            supervisor_latch_stop();
+            event_line("EVENT:CMD_EXECUTED:SYS_STOP"); // also if already latched
+            return true;
+        }
+        if (strcmp(cmd, "OBSTACLE_RESET") == 0)
+        {
+            ultrasonic_request_reset();
+            return true;
+        }
+        if (strcmp(cmd, "SYS_RESUME") == 0)
+        {
+            // Releases the latch only. Nothing latched resumes: the car moves
+            // again with the next C:SET_SPEED, and stays STOPPED while an
+            // obstacle is still ahead.
+            supervisor_release_stop();
+            event_line("EVENT:CMD_EXECUTED:SYS_RESUME"); // also if nothing was latched
+            return true;
+        }
+        break;
+
+    default:
+        break;
+    }
+    return false;
+}
+
+static void poll(Stream &stream, line_accum_t *acc)
+{
+    while (read_line(stream, acc))
+    {
+        if (dispatch(acc->buf))
+        {
+            supervisor_feed_watchdog();
+        }
+        else
+        {
+            log_line("[LinkRx] unknown command, ignored");
+        }
+    }
+}
+
+void link_rx_task(void *pvParameters)
+{
+    (void)pvParameters;
+    // One accumulator per port: sharing one would mix partial lines.
     static line_accum_t acc_usb;
-    static line_accum_t acc_uart1;
-    acc_usb.len = 0;
-    acc_usb.overflowed = false;
-    acc_uart1.len = 0;
-    acc_uart1.overflowed = false;
+    static line_accum_t acc_uart;
 
-    const char *data = NULL;
+    log_line("[LinkRx] started");
 
-    serial_line("[LinkRxTask] LinkRx task started");
-
-    while (1) {
-        // Read UART data from USB Serial first (testing over single USB cable), then from Serial1
-        data = NULL;
-        if (read_line_accum(Serial, &acc_usb)) {
-            data = acc_usb.buf;
-        } else if (read_line_accum(Serial1, &acc_uart1)) {
-            data = acc_uart1.buf;
-        }
-
-        if (data != NULL) {
-            char channel;
-            char cmd[32];
-            char value_str[32];
-            int32_t value = 0;
-            // A-6: only a command that is actually dispatched to a known channel
-            // feeds the watchdog. A stream of garbage must not keep it alive.
-            bool command_dispatched = false;
-
-            if (parse_uart_message(data, &channel, cmd, value_str, sizeof(value_str), &value)) {
-                // Route based on channel
-                switch (channel) {
-                    case CHANNEL_EMERGENCY:
-                        if (strcmp(cmd, "BRAKE_NOW") == 0 || strcmp(cmd, "STOP") == 0) {
-                            // Emergency: send notification to MotorTask
-                            serial_line("EVENT:CMD_RECEIVED:BRAKE_NOW");
-                            Serial.flush();
-                            motor_task_trigger_emergency();
-                            command_dispatched = true;
-                            serial_line("[LinkRxTask] Emergency brake triggered via UART");
-                        }
-                        break;
-                        
-                    case CHANNEL_CONTROL: {
-                        // Always send commands to mailboxes - tasks will validate state before execution
-                        if (strcmp(cmd, "SET_SPEED") == 0) {
-                            serial_linef("EVENT:CMD_RECEIVED:SET_SPEED:%ld", (long)value);
-                            Serial.flush();
-                            if (motor_mb != NULL) {
-                                mailbox_write(motor_mb, TOPIC_MOTOR, CMD_SET_SPEED, value, CONTROL_CMD_TTL_MS);
-                                command_dispatched = true;
-                            }
-                        } else if (strcmp(cmd, "SET_STEER") == 0) {
-                            serial_linef("EVENT:CMD_RECEIVED:SET_STEER:%ld", (long)value);
-                            Serial.flush();
-                            if (steer_mb != NULL) {
-                                mailbox_write(steer_mb, TOPIC_STEER, CMD_SET_STEER, value, CONTROL_CMD_TTL_MS);
-                                command_dispatched = true;
-                            }
-                        } else if (strcmp(cmd, "SET_DIR") == 0) {
-                            // C:SET_DIR:<0|1> - sentido de marcha. 1 adelante, 0 atras.
-                            // C:SET_SPEED satura los negativos a 0, asi que el sentido
-                            // va en este comando aparte.
-                            //
-                            // No usa mailbox: es una bandera volatil. MotorTask aplica el cambio en su rama de
-                            // CMD_SET_SPEED, que es la que tiene el tiempo muerto que
-                            // evita invertir el puente H con corriente, asi que el
-                            // emisor debe reenviar SET_SPEED despues de este comando.
-                            serial_linef("EVENT:CMD_RECEIVED:SET_DIR:%s", value != 0 ? "FORWARD" : "BACKWARD");
-                            Serial.flush();
-                            motor_set_requested_direction(value != 0);
-                            command_dispatched = true;
-                        }
-                        break;
-                    }
-                        
-                    case CHANNEL_MANAGEMENT:
-                        // M:PING:0 - liveness only. With latching speed the
-                        // controller stops re-sending SET_SPEED, so this is what
-                        // proves the link is still up. It touches no mailbox and
-                        // changes no state: its only effect is feeding the
-                        // watchdog via command_dispatched below.
-                        if (strcmp(cmd, "PING") == 0) {
-                            command_dispatched = true;
-                        } else if (strcmp(cmd, "SYS_STOP") == 0) {
-                            // M:SYS_STOP:0 - latch STOPPED (speed 0, servo frozen).
-                            // Sent once; only M:SYS_RESUME:0 releases it. No mailbox:
-                            // a flag cannot be overwritten by the next M: command.
-                            serial_line("EVENT:CMD_RECEIVED:SYS_STOP");
-                            if (supervisor_latch_stop()) {
-                                serial_line("EVENT:CMD_EXECUTED:SYS_STOP");
-                            }
-                            command_dispatched = true;
-                        } else if (strcmp(cmd, "SYS_RESUME") == 0) {
-                            // M:SYS_RESUME:0 - release the SYS_STOP latch. With an
-                            // obstacle still ahead the system stays STOPPED until it
-                            // clears. Nothing latched is resumed: the car moves again
-                            // only with a new C:SET_SPEED.
-                            serial_line("EVENT:CMD_RECEIVED:SYS_RESUME");
-                            if (supervisor_release_stop()) {
-                                serial_line("EVENT:CMD_EXECUTED:SYS_RESUME");
-                            }
-                            command_dispatched = true;
-                        } else if (strcmp(cmd, "SYS_ARM") == 0) {
-                            if (supervisor_mb != NULL) {
-                                serial_line("EVENT:CMD_RECEIVED:SYS_ARM");
-                                Serial.flush();
-                                mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_ARM, 0, 5000);
-                                command_dispatched = true;
-                                serial_line("[LinkRxTask] SYS_ARM command");
-                            }
-                        } else if (strcmp(cmd, "SYS_DISARM") == 0) {
-                            if (supervisor_mb != NULL) {
-                                serial_line("EVENT:CMD_RECEIVED:SYS_DISARM");
-                                Serial.flush();
-                                mailbox_write(supervisor_mb, TOPIC_SYSTEM, CMD_SYS_DISARM, 0, 5000);
-                                command_dispatched = true;
-                                serial_line("[LinkRxTask] SYS_DISARM command");
-                            }
-                        } else if (strcmp(cmd, "LIGHTS_ON") == 0) {
-                            if (lights_mb != NULL) {
-                                serial_line("EVENT:CMD_RECEIVED:LIGHTS_ON");
-                                Serial.flush();
-                                mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_ON, 0, 1000);
-                                command_dispatched = true;
-                                serial_line("[LinkRxTask] LIGHTS_ON command");
-                            }
-                        } else if (strcmp(cmd, "LIGHTS_OFF") == 0) {
-                            if (lights_mb != NULL) {
-                                serial_line("EVENT:CMD_RECEIVED:LIGHTS_OFF");
-                                Serial.flush();
-                                mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_OFF, 0, 1000);
-                                command_dispatched = true;
-                                serial_line("[LinkRxTask] LIGHTS_OFF command");
-                            }
-                        } else if (strcmp(cmd, "LIGHTS_AUTO") == 0) {
-                            if (lights_mb != NULL) {
-                                serial_line("EVENT:CMD_RECEIVED:LIGHTS_AUTO");
-                                Serial.flush();
-                                mailbox_write(lights_mb, TOPIC_LIGHTS, CMD_LIGHTS_AUTO, 0, 1000);
-                                command_dispatched = true;
-                                serial_line("[LinkRxTask] LIGHTS_AUTO command");
-                            }
-                        }
-                        break;
-                        
-                    default:
-                        serial_linef("[LinkRxTask] Unknown channel: %c", channel);
-                        break;
-                }
-            } else {
-                serial_linef("[LinkRxTask] Failed to parse message: %s", data);
-            }
-
-            // A-6: feed the watchdog only for commands we actually understood and
-            // routed. Previously any parseable garbage kept the watchdog alive.
-            if (command_dispatched) {
-                supervisor_update_heartbeat();
-            }
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to avoid busy waiting
+    while (1)
+    {
+        poll(Serial, &acc_usb);  // USB (also used for bench testing)
+        poll(Serial1, &acc_uart); // UART to the Jetson
+        vTaskDelay(pdMS_TO_TICKS(LINK_RX_POLL_MS));
     }
 }

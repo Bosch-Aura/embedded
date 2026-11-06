@@ -7,6 +7,10 @@ extern "C" {
 
 void ultrasonic_task(void *pvParameters);
 
+// M:OBSTACLE_RESET:0 (LinkRxTask): release an obstacle hold now. Handled on the
+// next reading; the hold comes back if the obstacle is still there.
+void ultrasonic_request_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

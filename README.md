@@ -1,229 +1,102 @@
-# Documento de Arquitectura de Software (SAD)
+# Firmware del ESP32 (Vehicle Control Unit)
 
-**Subsistema:** Vehicle Control Unit (VCU)  
-**Plataforma:** ESP32 / FreeRTOS  
-**Versión:** 2.0.0  
-**Fecha:** Noviembre 2025  
+**Plataforma:** ESP32 DevKit v1 · Arduino + FreeRTOS · PlatformIO
 
----
+El ESP32 es la capa de bajo nivel de un auto autónomo a escala. Recibe órdenes de la Jetson por serie y:
 
-## 1. Visión General de la Arquitectura
+- mantiene una **velocidad crucero** (PWM latcheado) en el sentido pedido;
+- mueve el **servo de dirección** al ángulo pedido;
+- obedece **stop / start** (`M:SYS_STOP` / `M:SYS_RESUME`) y un freno de emergencia;
+- **frena solo ante un obstáculo** detectado por el ultrasonido (HC-SR04) y avisa a la Jetson;
+- **detiene todo** si se pierde el enlace con la Jetson (watchdog de 300 ms) o si se acciona el E-STOP.
 
-El sistema implementa una arquitectura de tiempo real basada en muestreo periódico (**Time-Triggered Architecture**). Las tareas de control se ejecutan de manera sincrónica a una frecuencia predeterminada, garantizando un ciclo de ejecución constante y predecible.
+El protocolo completo está en [`docs/BRAIN_TEAM_PROTOCOL.md`](docs/BRAIN_TEAM_PROTOCOL.md).
 
-Este diseño prioriza la estabilidad del bucle de control y la simplicidad en la depuración, utilizando un modelo de **Mailboxes** para el intercambio seguro de datos entre hilos.
+## Compilar y flashear
 
-### 1.1 Drivers Arquitectónicos
-El diseño actual se fundamenta en los siguientes principios:
-
-* **Determinismo de Ciclo:** Las tareas de actuación (Motor/Dirección) mantienen una cadencia fija de 100Hz (10ms), lo que asegura que el PWM se actualice de forma constante.
-* **Seguridad (Safety):** Se implementa un mecanismo de `Time-To-Live` (TTL) que valida la frescura de los datos en cada ciclo de lectura. El control es ***latching***: cuando el comando vence su TTL, `MotorTask` **no frena**, sostiene la última velocidad (y `SteerTask` el último ángulo). La protección ante la pérdida de enlace la da el **watchdog** del supervisor (300 ms): sin comandos válidos lleva el sistema a `FAULT`, que frena y borra la velocidad latcheada. El lazo completo está además guardado por el estado del sistema, de modo que `DISARM` y `FAULT` detienen la tracción y la mantienen detenida.
-* **Separación de Recursos:** Se utiliza *Core Pinning* para aislar el procesamiento de comunicaciones (Core 1) de la ejecución crítica de movimiento (Core 0).
-
-## 2. Estrategia de Comunicación Inter-Procesos (IPC)
-
-La arquitectura utiliza un modelo híbrido: **Polling** para operación nominal y **Notificaciones Directas** para emergencias.
-
-### 2.1 Operación Nominal: Polling con Mailbox
-El flujo de datos estándar desacopla la recepción de la ejecución:
-
-1.  **Recepción Asíncrona:** El productor (`LinkRx`) actualiza el `mailbox_t` (protegido por Mutex) inmediatamente al recibir datos por UART.
-2.  **Ejecución Sincrónica:** El consumidor (`MotorTask`) utiliza `vTaskDelay` para mantener un periodo de muestreo fijo (10ms). Al despertar, toma la "foto" más reciente del estado del buzón y la aplica.
-
-### 2.2 Mecanismo de Excepción: Fast-Path de Emergencia
-Para garantizar la seguridad crítica, el sistema implementa un canal de comunicación de alta prioridad que permite omitir el ciclo de espera periódico y forzar el frenado inmediato.
-
-* **Mecanismo de Acción:**
-    1.  **Notificación Directa:** Se utiliza un mecanismo de señalización asíncrono (Event Flags) para enviar una alerta directa a la tarea de control, evitando la cola de espera del *polling*.
-    2.  **Despertar Inmediato:** Al recibir esta señal, la Tarea de Motor interrumpe su estado de suspensión (`Sleep`) instantáneamente, sin esperar a que se cumpla el tiempo del ciclo.
-    3.  **Prioridad de Ejecución:** La lógica de emergencia se evalúa antes que cualquier comando de movimiento estándar. **Latencia real: hasta ~50 ms en el peor caso** (polling de `LinkRxTask` 10 ms + ciclo de `MotorTask` 10 ms + bloqueo de `pulseIn()` del ultrasonido hasta 30 ms). La notificación no interrumpe el `vTaskDelay()` del lazo: ver hallazgos A-1 y A-2 de `docs/PLAN_MEJORAS.md`.
-
-* **Fuentes de Disparo:**
-    * **Sensores Físicos:** Ultrasonido (barrera de proximidad: < 30 cm en 3 lecturas seguidas). **No** usa este camino ni pasa a `FAULT`: pone el sistema en `STOPPED` mientras haya obstáculo (`supervisor_set_obstacle()`). Ver §3.2.
-    * **Comandos Externos:** Solicitud de parada inmediata vía serie (`E:BRAKE_NOW` / `E:STOP`).
-    * **Sistema:** Fallos de estado detectados por el Supervisor.
-
-| Característica | Comandos Normales | Emergencia |
-| :--- | :--- | :--- |
-| **Mecanismo** | `mailbox_write()` | `motor_task_trigger_emergency()` |
-| **Activación** | Polling (Timer) | Notificación Directa |
-| **Latencia** | Variable (0-10ms) | Hasta ~50ms peor caso (ver A-1) |
-
-### 2.3 Características Operativas (Limitaciones)
-* **Previsibilidad vs Latencia:** La carga de la CPU es constante, pero existe un *jitter* inherente en la respuesta a comandos normales.
-* **Filtrado Implícito:** Al muestrear a 100Hz, el sistema ignora variaciones de alta frecuencia entre ciclos.
-
----
-
-## 3. Vista Lógica y Estructura de Datos
-
-### 3.1 Estructura del Mailbox
-La estructura de datos es el contrato central entre tareas, diseñada para la integridad y validación temporal.
-
-```c
-typedef struct {
-    uint32_t ts_ms;          // Timestamp de recepción
-    topic_t topic;           // Identificador (Motor, Steer)
-    command_type_t cmd;      // Comando
-    int32_t value;           // Valor PWM/Ángulo
-    uint32_t ttl_ms;         // Vida útil del comando
-    uint32_t seq;            // Contador de escrituras
-    bool valid;              // false hasta la primera escritura
-    SemaphoreHandle_t mutex; // Protección de lectura/escritura
-} mailbox_t;
+```bash
+pio run -e esp32doit-devkit-v1              # compilar
+pio run -e esp32doit-devkit-v1 -t upload    # flashear
+./flashear.sh                               # o el script, que también detecta el puerto
 ```
 
-### 3.2 Subsistema de Supervisión (`SupervisorTask`)
-El `supervisor_mailbox` no gestiona el movimiento del vehículo, sino la **Gestión del Estado del Sistema**.
+El entorno `esp32doit-devkit-v1-debug` espera 3 s al arrancar para que se conecte el monitor serie. No se
+usa en el auto.
 
-* **Responsabilidad:** Controlar la Máquina de Estados Global (`DISARMED` → `ARMED` → `RUNNING` ⇄ `STOPPED`, y `FAULT`).
-* **Estado inicial:** depende de la compilación. Tal como está hoy `platformio.ini` (sin `-DBOOT_ARMED`) **arranca `DISARMED`** y ningún comando de tracción o dirección se ejecuta hasta recibir `M:SYS_ARM:0`. Si se compila con `-DBOOT_ARMED`, arranca `ARMED` y pasa solo a `RUNNING`, así que el primer `C:SET_SPEED` se obedece. La recuperación desde `FAULT` se documenta en `docs/BRAIN_TEAM_PROTOCOL.md`.
-* **Un comando a la vez:** el `supervisor_mailbox` tiene un solo lugar y se revisa cada 20 ms; dos comandos de gestión seguidos pueden pisarse. Cada comando se ejecuta una sola vez (por *timestamp*), aunque su TTL sea de 5 s.
-* **Fuente de Comandos:** `link_rx_task` (USB y UART externo). El firmware no tiene página web ni Wi-Fi.
+## Arquitectura
 
-| Comando | Acción | Transición Típica |
-| :--- | :--- | :--- |
-| **CMD_SYS_ARM** | Habilita el sistema y resetea heartbeat. Rechazado si el E-STOP sigue accionado. | `DISARMED`/`FAULT` → `ARMED` |
-| **CMD_SYS_DISARM** | Notifica emergencia a `MotorTask`, centra dirección vía mailbox y deshabilita. | `ANY` → `DISARMED` |
-| **M:SYS_STOP** / **M:SYS_RESUME** | No van por el mailbox: `LinkRxTask` engancha o suelta una bandera (`supervisor_latch_stop()` / `supervisor_release_stop()`). Solo `SYS_RESUME` suelta el stop. | `RUNNING` ⇄ `STOPPED` |
+Cuatro tareas FreeRTOS. Cada recurso de hardware tiene **un solo dueño**, y los estados los escribe una
+sola tarea.
 
-* **Funciones Adicionales:**
-    * **Watchdog/Heartbeat:** verifica recepción constante de datos (300 ms, uno solo para cualquier cliente: el firmware no tiene modos de manejo, eso lo decide la Jetson). Si falla, lleva el sistema a `FAULT` y dispara el frenado de emergencia.
-    * **E-STOP Hardware:** Monitoreo directo de pin GPIO para parada de emergencia física.
-    * **Validación:** Impide que los comandos de motor/dirección se ejecuten si el estado no es `ARMED/RUNNING` (o mientras hay un pedido de `STOPPED`).
-    * **`STOPPED`:** estado armado pero quieto: velocidad 0 y servo congelado donde está (no se centra). Se entra por un obstáculo del ultrasonido (`EVENT:OBSTACLE_DETECTED:<cm>`) o por `M:SYS_STOP:0`, que queda **enganchado** hasta `M:SYS_RESUME:0`: ningún otro comando lo suelta, ni siquiera desarmar y volver a armar. Se vuelve solo a `RUNNING` cuando no queda ninguna de las dos causas. `MotorTask` y `SteerTask` consultan `supervisor_stop_requested()` en cada ciclo, así que frenan sin esperar el ciclo del supervisor. Al frenar se borra la velocidad latcheada: el auto vuelve a andar solo con un `C:SET_SPEED` nuevo. `FAULT` (watchdog o E-STOP) nunca se borra solo: hace falta `M:SYS_ARM:0`.
+| Tarea | Core | Prioridad | Período | Responsabilidad |
+|---|---|---|---|---|
+| `Ultrasonic` (`ultrasonic_task.cpp`) | 0 | 5 | 50 ms + lectura | Lee el HC-SR04 y decide si hay obstáculo. Avisa al supervisor. Mientras espera el eco duerme: el pulso se mide con una interrupción (`hardware.cpp`). |
+| `Control` (`control_task.cpp`) | 0 | 4 | 10 ms, o en el acto si la despiertan | **Única dueña del puente H y del servo.** Aplica velocidad, sentido y ángulo según el estado. |
+| `LinkRx` (`link_rx_task.cpp`) | 1 | 4 | 10 ms | Arma líneas desde USB y UART, interpreta los comandos y alimenta el watchdog. |
+| `Supervisor` (`supervisor_task.cpp`) | 1 | 2 | 20 ms | **Único que escribe el estado** (`DISARMED/RUNNING/STOPPED/FAULT`). Watchdog y E-STOP. |
 
----
-
-## 4. Diagramas de Arquitectura
-
-### 4.1 Diagrama de Secuencia: Ciclo de Control
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant UART
-    participant Producer as LinkRxTask
-    participant Safety as UltrasonicTask
-    participant Data as Motor Mailbox
-    participant Consumer as MotorTask
-
-    %% CASO 1: COMANDO NORMAL (POLLING)
-    Note over Consumer: Estado: BLOCKED (Delay 10ms)
-    UART->>Producer: Recibe "SET_SPEED: 200"
-    Producer->>Data: Escribe {val: 200}
-    
-    Note over Consumer: ... Esperando Timer ...
-    
-    Note over Consumer: Fin vTaskDelay()
-    rect rgb(40, 40, 50)
-        note right of Consumer: Ciclo Normal
-        Consumer->>Data: Lee Mailbox
-        Consumer->>Consumer: Actualizar PWM
-    end
-
-    %% CASO 2: EMERGENCIA (FAST PATH)
-    Note over Consumer: Estado: BLOCKED (Delay 10ms)
-    Producer->>Producer: E:BRAKE_NOW recibido
-    
-    rect rgb(60, 20, 20)
-        note right of Producer: Fast Path (~50ms peor caso, ver A-1)
-        Producer->>Consumer: xTaskNotify(EMERGENCY)
-        Note over Consumer: DESPIERTA INMEDIATAMENTE
-        Consumer->>Consumer: STOP MOTOR
-    end
-
-    %% CASO 3: OBSTÁCULO -> STOPPED (SIN FAULT)
-    Safety->>Safety: Obstáculo < 30 cm (3 lecturas)
-    Safety->>Consumer: supervisor_set_obstacle(true)
-    Note over Consumer: STOPPED: frena, ignora SET_SPEED y SET_STEER
-    Safety->>Safety: Despejado: 3 lecturas >= 35 cm o 10 seguidas sin eco
-    Safety->>Consumer: supervisor_set_obstacle(false)
-    Note over Consumer: RUNNING (si no hay SYS_STOP), parado hasta un SET_SPEED nuevo
+```
+ Jetson ──USB/UART──▶ LinkRx ──control_set_*()──────────────▶ Control ──▶ puente H, servo
+                         │                                      ▲  ▲
+                         ├─supervisor_request_arm/disarm()─▶ Supervisor ──estado──┘  │
+                         ├─supervisor_latch/release_stop()─────┘   ▲                 │
+                         └─ultrasonic_request_reset()──▶ Ultrasonic ─set_obstacle()──┘
+ Todas las tareas ──event_*()/log_*()──▶ serial_out ──▶ USB (+ UART para los EVENT:)
 ```
 
-### 4.2 Diagrama de Despliegue
+### Cómo se comunican
 
-```mermaid
-graph TD
-    subgraph Core1 ["Core 1: Comms & System"]
-        direction TB
-        LGT[LightsTask<br/>Prio: 1]
-        RX[LinkRxTask<br/>Prio: 4]
-        TX[LinkTxTask<br/>Prio: 2]
-        SUP[SupervisorTask<br/>Prio: 2]
-    end
+- **Comandos hacia `Control`**: un struct protegido por un spinlock (`portMUX`). Cada comando lleva un
+  número de secuencia y se aplica **exactamente una vez** en el ciclo siguiente. El freno usa el mismo canal que
+  la velocidad (velocidad 0), así que decide el orden de llegada.
+- **Despertar inmediato**: `Control` duerme con `ulTaskNotifyTake(…, 10 ms)`. Un freno, un obstáculo, un
+  `SYS_STOP` o un cambio de estado le mandan una notificación (`control_wake()`), así que reacciona en el
+  acto en lugar de esperar al próximo ciclo.
+- **Estado**: `volatile`, lo escribe solo `Supervisor`. `SYS_ARM` y `SYS_DISARM` llegan por una cola chica y
+  se procesan en orden. Al pasar a `DISARMED` o `FAULT` se borra la velocidad explícitamente, por si se vuelve a
+  armar antes de que `Control` llegue a ver el cambio.
+- **Paradas**: `obstacle_active` lo escribe `Ultrasonic` y `stop_latched` lo escribe `LinkRx`. `Control` los
+  lee directamente para frenar sin esperar al supervisor.
+- **Salida serie**: `serial_out` arma cada línea completa y la escribe bajo un mutex, así nunca salen dos
+  líneas pegadas. `log_*` sale solo por USB; `event_*` sale por USB y UART. Los buffers de transmisión son
+  de 1 KB, para que escribir un evento no frene el lazo de control.
 
-    subgraph Shared ["Espacio de Memoria"]
-        direction TB
-        MB_MOT[("Motor MB")]
-        MB_STR[("Steer MB")]
-        MB_LGT[("Lights MB")]
-        MB_SUP[("Supervisor MB")]
-    end
+### Reglas de seguridad (no romperlas)
 
-    subgraph Core0 ["Core 0: Safety & Control"]
-        direction TB
-        US["UltrasonicTask<br/>Prio: 5 (SAFETY)"]
-        MOT[MotorTask<br/>Prio: 4]
-        STR[SteerTask<br/>Prio: 3]
-    end
+1. **Fail-safe en `Control`**: si no está armado, si hay `SYS_STOP` o si se intenta avanzar contra un
+   obstáculo, el auto **frena y se borra la velocidad latcheada**. Nunca vuelve a arrancar solo.
+2. **Nunca se invierte el puente H con PWM aplicado**: primero se corta el PWM, se esperan 60 ms
+   (`MOTOR_DIRECTION_DEADTIME_MS`) y recién ahí se cambian IN3/IN4. Los 60 ms se cuentan desde la última vez
+   que el motor anduvo en el otro sentido, **aunque en el medio haya frenado**: frenado no quiere decir quieto.
+   La espera no bloquea el lazo.
+3. **Los valores se saturan en el tipo con signo**, antes de convertirlos (si no, `-1` termina siendo 255).
+4. **Watchdog**: la antigüedad del último comando se calcula con el reloj leído *después* del heartbeat,
+   como resta sin signo (así también es correcta cuando el contador de ticks da la vuelta). Solo alimentan el
+   watchdog los comandos reconocidos.
+5. **Ultrasonido**: solo cuentan las lecturas válidas. Un error no es evidencia de nada (ver
+   `ultrasonic_task.cpp`).
+6. **`setup()` pone el hardware en estado seguro antes que cualquier otra cosa** y, si alguna tarea no
+   se puede crear, reinicia la placa en lugar de arrancar sin watchdog.
 
-    %% Relaciones de Escritura
-    RX ==> MB_MOT
-    RX ==> MB_STR
-    RX ==> MB_LGT
-    RX ==> MB_SUP
+## Configuración
 
-    %% Lectura
-    MB_MOT -.->|"Lee (10ms)"| MOT
-    MB_STR -.->|"Lee (10ms)"| STR
-    MB_SUP -.->|"Lee (20ms)"| SUP
-    MB_LGT -.->|"Lee (1000ms)"| LGT
+Los valores de hardware (pines, topes del servo, umbral del ultrasonido, watchdog) están en
+`include/hardware.h`, envueltos en `#ifndef`. Se pueden sobrescribir con `-D` o desde
+`Brain-Aura/hardware.env` (ver `scripts/hardware_env.py` y la última sección del protocolo).
 
-    %% Relaciones de Control
-    SUP -.->|"Control de Estado"| MOT
-    US -.->|"Emergency Stop"| MOT
-```
+Flags de compilación útiles: `-DBOOT_ARMED` (arranca en `RUNNING`), `-DULTRASONIC_FACING_FORWARD=0` (el
+sensor está atrás), `-DULTRASONIC_USE_PULSEIN` (mide el eco con `pulseIn()` en lugar de la interrupción),
+`-DMOTOR_DIRECTION_DEADTIME_MS=…`, `-DULTRASONIC_DEBOUNCE_COUNT=…`.
 
----
+## Pruebas sin el auto
 
-## 5. Vista de Procesos y Concurrencia
+`test/sim/` compila el firmware real para la PC, con FreeRTOS, Arduino y los pines simulados. Lo maneja
+con el código real de AURA-2026 (`CommandSender`, el dashboard, las estrategias de señales) e incluye
+escenarios de manejo, estacionamiento, watchdog (también en el wrap del tick), E-STOP, regresiones de bugs
+ya encontrados y ultrasonido con pérdida de ecos, con los dos drivers de eco. `./test/sim/run_all.sh` corre
+todo. Ver [`test/sim/README.md`](test/sim/README.md).
 
-El sistema utiliza **Multiprocesamiento Asimétrico** sobre los dos núcleos del ESP32. Se ha aislado el **Core 0** para tareas críticas de movimiento y seguridad, mientras que el **Core 1** gestiona la carga variable de comunicaciones e I/O secundario.
-
-### 5.1 Distribución de Carga (Core Affinity)
-
-| Núcleo | Rol | Tareas Asignadas | Prioridad | Descripción |
-| :--- | :--- | :--- | :--- | :--- |
-| **Core 0** | **Safety & Motion** | `UltrasonicTask` | **Crítica (5)** | **Capa de Seguridad:** Monitoreo de entorno y prevención de colisiones. Máxima prioridad del sistema. |
-| **Core 0** | **Real-Time Control** | `MotorTask`, `SteerTask` | Alta (3-4) | Generación de PWM preciso y bucles de control. Aislado de interrupciones de red. |
-| **Core 1** | **Comms Ingress** | `LinkRxTask` | Alta (4) | Recepción y decodificación de alta velocidad (USB y UART externo). |
-| **Core 1** | **System & I/O** | `Supervisor`, `LinkTx`, `Lights` | Media/Baja (1-2) | Telemetría, watchdog y control de iluminación. |
-
-### 5.2 Salida serie compartida
-
-Todas las tareas, en los dos núcleos, imprimen por el mismo `Serial` (USB). Para que las líneas no se mezclen, **toda la salida pasa por `serial_line()` / `serial_linef()`** (`src/serial_out.h`): arman la línea completa con `\r\n` y la escriben de una sola vez bajo un mutex (con herencia de prioridad). Antes, `Serial.println()` eran dos escrituras y podían salir dos eventos pegados en una línea.
-
-**Regla para código nuevo:** imprimir siempre con `serial_line()`/`serial_linef()`, nunca con `Serial.print`/`Serial.println` directo. La única salida que no pasa por ahí es la copia de `STATE_CHANGED` que `LinkTxTask` manda por `Serial1` (UART externo), que tiene una sola escritora.
-
----
-
-## 6. Evolución de la Arquitectura (Roadmap)
-
-La arquitectura actual (v2.0) proporciona una base sólida y estable. Sin embargo, para escenarios de competición o maniobras de alta velocidad que requieren tiempos de reacción en el orden de los microsegundos, se ha planteado una evolución hacia la versión 3.0.
-
-### 6.1 Fortalezas del Diseño Actual
-* **Estabilidad de Carga (Determinismo):** Al utilizar una frecuencia de ejecución fija, el consumo de CPU es constante y predecible. El sistema es inmune a "tormentas de interrupciones" si los sensores envían datos excesivos o ruidosos.
-* **Integridad de Datos:** El patrón de **Mailbox con Mutex** garantiza que las tareas de control siempre accedan a una "foto" coherente y completa del estado (Atomicidad), eliminando condiciones de carrera sobre las variables de control.
-* **Aislamiento de Fallos:** La estrategia de **Core Pinning** ha demostrado ser eficaz para evitar que la latencia variable de las comunicaciones (Core 1) afecte la generación de señales PWM críticas (Core 0).
-* **Seguridad Híbrida:** el sistema es de *polling*. El **Fast-Path de Emergencia** evalúa la notificación al principio del ciclo, pero **no** elude la espera: `ulTaskNotifyTake()` se usa con timeout 0 y el lazo bloquea en `vTaskDelay()`, que las notificaciones no interrumpen. La latencia de parada es de hasta ~50 ms en el peor caso. Implementar A-1 (`docs/PLAN_MEJORAS.md`) la reduciría a <1 ms real.
-
-### 6.2 Áreas de Optimización
-1.  **Reducción de Latencia:** En el modelo actual, el tiempo de respuesta está acotado por el periodo de muestreo (10ms). Una arquitectura basada en eventos eliminaría esta espera.
-2.  **Eficiencia Energética:** La transición a un modelo *Event-Driven* permitiría que el procesador permanezca en estado *Idle* durante los periodos de inactividad, en lugar de despertar periódicamente.
-
-> **Nota:** Se ha redactado la propuesta **`docs/v3.0.0/REFACTOR_PROPOSAL.md`**, una versión que utilizara las notificaciones para reemplazar el polling
+`test/python/test_uart_simulator.py` es una consola interactiva para mandarle comandos a la placa real.
 
 ---
 

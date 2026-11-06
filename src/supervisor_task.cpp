@@ -1,273 +1,237 @@
 #include "supervisor_task.h"
+#include "control_task.h"
 #include "hardware.h"
-#include "mailbox.h"
-#include "messages.h"
-#include "link_tx_task.h"
-#include "motor_task.h"
+#include "serial_out.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "serial_out.h"
 #include <Arduino.h>
 
 #define SUPERVISOR_TASK_PERIOD_MS 20
-// The watchdog timeout comes from hardware.h (WATCHDOG_TIMEOUT_MS). Do not
-// redefine it here.
 
-static mailbox_t *supervisor_mb = NULL;
-static mailbox_t *motor_mb = NULL;
-static mailbox_t *steer_mb = NULL;
+typedef enum { REQ_NONE = 0, REQ_ARM, REQ_DISARM } request_t;
 
-// MEDIO-3: these are written by SupervisorTask (core 1) and read by
-// motor_control_allowed() from MotorTask (core 0), and last_heartbeat_ms is
-// written from LinkRxTask too. Without volatile the compiler is
-// free to hoist the load out of MotorTask's while(1) - which would freeze the
-// traction authorization at whatever value it had on the first iteration.
-//
-// There are no driving modes here: whether the car drives itself or a person
-// drives it is decided on the Jetson. The firmware only knows whether it is
-// allowed to move (the state) and whether the link is alive (the watchdog).
+// SYS_ARM / SYS_DISARM requests from LinkRxTask, handled IN ORDER. A single
+// "last one wins" slot let DISARM followed by ARM within one cycle skip the
+// DISARM entirely: no brake, latched speed kept, car still driving.
+#define REQUEST_QUEUE_LEN 8
+static request_t requests[REQUEST_QUEUE_LEN];
+static uint8_t req_head = 0, req_count = 0;
+static portMUX_TYPE req_lock = portMUX_INITIALIZER_UNLOCKED;
 
-// Boot state.
+static void push_request(request_t r)
+{
+    taskENTER_CRITICAL(&req_lock);
+    if (req_count == REQUEST_QUEUE_LEN)
+    {
+        // Full (a flood of ARM/DISARM): drop the oldest, keep the newest.
+        req_head = (req_head + 1) % REQUEST_QUEUE_LEN;
+        req_count--;
+    }
+    requests[(req_head + req_count) % REQUEST_QUEUE_LEN] = r;
+    req_count++;
+    taskEXIT_CRITICAL(&req_lock);
+}
+
+static request_t pop_request(void)
+{
+    request_t r = REQ_NONE;
+    taskENTER_CRITICAL(&req_lock);
+    if (req_count > 0)
+    {
+        r = requests[req_head];
+        req_head = (req_head + 1) % REQUEST_QUEUE_LEN;
+        req_count--;
+    }
+    taskEXIT_CRITICAL(&req_lock);
+    return r;
+}
+
+// volatile: written on one core and read in a loop on the other. Without it
+// the compiler may hoist the load out of ControlTask's while(1).
 //
-// C-3 made the system boot DISARMED, matching docs/BRAIN_TEAM_PROTOCOL.md and
-// requiring an explicit M:SYS_ARM:0 before anything can move.
-//
-// -DBOOT_ARMED (set in platformio.ini) skips that handshake: the vehicle comes
-// up ARMED and immediately auto-transitions to RUNNING. The
-// consequence is that the FIRST C:SET_SPEED to arrive is obeyed - there is no
-// arming step to forget and no dashboard needed. It is still not able to move
-// on its own: with no sustained command MotorTask brakes every cycle (C-1).
-// Note that the watchdog only starts counting after the first heartbeat, so a
-// board that boots ARMED and never receives anything stays in RUNNING.
+// Boot state: DISARMED, nothing moves until M:SYS_ARM:0. -DBOOT_ARMED boots
+// straight into RUNNING and obeys the first C:SET_SPEED. The watchdog only
+// starts counting at the first command, so an armed board that never hears
+// from the Jetson stays RUNNING (and still does not move: nothing is latched).
 #ifdef BOOT_ARMED
-static volatile system_state_t current_state = STATE_ARMED;
-static system_state_t previous_state = STATE_ARMED;
+static volatile system_state_t current_state = STATE_RUNNING;
 #else
 static volatile system_state_t current_state = STATE_DISARMED;
-static system_state_t previous_state = STATE_DISARMED;
 #endif
 static volatile uint32_t last_heartbeat_ms = 0;
-
-// STOPPED requests (see supervisor_stop_requested()).
-// stop_latched survives DISARM, FAULT and re-ARM on purpose: an armed car that
-// was told to stop comes back STOPPED, never RUNNING, until M:SYS_RESUME:0.
-// Only a reboot clears it.
+static volatile bool have_heartbeat = false; // false until the first command
 static volatile bool obstacle_active = false;
 static volatile bool stop_latched = false;
 
-// Age of the last heartbeat, or false if none has arrived yet.
-//
-// The age MUST be measured against a clock read AFTER the heartbeat. The loop
-// used to compute `current_ms - last_heartbeat_ms` with current_ms taken at the
-// top of the cycle. In between, this task prints (with Serial.flush(), several
-// ms at 115200) and LinkRxTask - higher priority, same core - stores a NEWER
-// heartbeat. The unsigned subtraction then wrapped to ~4e9 ms and the watchdog
-// fired right after every SYS_ARM, with commands arriving every 50 ms.
-static bool heartbeat_age_ms(uint32_t *age_ms) {
-    const uint32_t heartbeat = last_heartbeat_ms; // snapshot: read once
-    if (heartbeat == 0) {
+static uint32_t now_ms(void) { return xTaskGetTickCount() * portTICK_PERIOD_MS; }
+
+// Heartbeat age, measured against a clock read AFTER loading the heartbeat.
+// Reading the clock first and the heartbeat later (LinkRxTask can store a newer
+// one in between) makes the unsigned subtraction wrap to ~4e9 and the watchdog
+// fire right after every SYS_ARM. With that order, plain unsigned subtraction
+// is also correct across the 32-bit tick wrap (~49.7 days); clamping
+// "now < heartbeat" to 0 blinded the watchdog for another 49 days there.
+static bool heartbeat_age_ms(uint32_t *age_ms)
+{
+    // acquire pairs with the release in supervisor_feed_watchdog(): once
+    // have_heartbeat is seen true, last_heartbeat_ms is the stored value.
+    if (!__atomic_load_n(&have_heartbeat, __ATOMIC_ACQUIRE))
+    {
         return false;
     }
-    const uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    *age_ms = (now >= heartbeat) ? (now - heartbeat) : 0;
+    const uint32_t heartbeat = __atomic_load_n(&last_heartbeat_ms, __ATOMIC_ACQUIRE);
+    const uint32_t now = now_ms();
+    *age_ms = now - heartbeat;
     return true;
 }
-static bool estop_triggered = false;
 
-void supervisor_task(void *pvParameters) {
-    supervisor_params_t *params = (supervisor_params_t *)pvParameters;
-    supervisor_mb = params->supervisor_mailbox;
-    motor_mb = params->motor_mailbox;
-    steer_mb = params->steer_mailbox;
-    
-    // Timestamp of the last management command actually acted upon, so a stale
-    // entry sitting in the mailbox until its TTL expires is not re-executed.
-    uint32_t last_processed_cmd_ts = 0;
+static void set_state(system_state_t s)
+{
+    if (s == current_state)
+    {
+        return;
+    }
+    current_state = s;
+    if (s == STATE_DISARMED || s == STATE_FAULT)
+    {
+        // Drop the latched speed explicitly, not only through the state: a
+        // re-ARM in the same cycle could otherwise come before ControlTask
+        // ever sees DISARMED/FAULT, and the old speed would still be there.
+        control_drop_speed();
+    }
+    event_linef("EVENT:STATE_CHANGED:%s", supervisor_state_name(s));
+    // Brake / center on this very cycle instead of waiting up to 10 ms.
+    control_wake();
+}
 
-    serial_line("[SupervisorTask] Supervisor task started");
-
-    // A-5: the 100 ms "give link_tx_task time to initialize" delay is gone.
-    // The TX queue is now created in setup() before any task exists, so there is
-    // nothing to wait for.
-
-    // Print initial state at boot
-    serial_linef("EVENT:STATE_CHANGED:%s", supervisor_state_name(current_state));
-    Serial.flush();
-    
-    // Also send via link_tx for UART transmission
-    link_tx_send_state_event(current_state);
-    
-    while (1) {
-        
-        // Read supervisor mailbox for commands
-        topic_t topic;
-        command_type_t cmd;
-        int32_t value;
-        uint32_t ts_ms;
-        bool expired;
-        
-        if (mailbox_read(supervisor_mb, &topic, &cmd, &value, &ts_ms, &expired)) {
-            // Management commands are EDGE triggered, not level triggered.
-            // mailbox_read() does not consume the entry, so a SYS_ARM (TTL 5 s)
-            // was re-executed on every 20 ms cycle for five seconds. That did
-            // not just spam EVENT:CMD_EXECUTED:SYS_ARM - it silently re-armed
-            // the vehicle right after a watchdog FAULT, defeating the very
-            // protection that had just stopped it. Only act on a timestamp we
-            // have not processed yet.
-            if (!expired && ts_ms != last_processed_cmd_ts) {
-                last_processed_cmd_ts = ts_ms;
-                switch (cmd) {
-                    case CMD_SYS_ARM:
-                        // C-3 / M-4: FAULT is a valid starting point for arming;
-                        // it is the natural recovery transition.
-                        if (current_state == STATE_DISARMED || current_state == STATE_FAULT) {
-                            // Only rearm if the cause of the fault is gone
-                            if (estop_is_triggered()) {
-                                serial_line("EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE");
-                                Serial.flush();
-                                serial_line("[SupervisorTask] SYS_ARM rejected - E-STOP still active");
-                                break;
-                            }
-                            current_state = STATE_ARMED;
-                            supervisor_update_heartbeat();
-                            serial_line("EVENT:CMD_EXECUTED:SYS_ARM");
-                            Serial.flush();
-                            serial_line("[SupervisorTask] System ARMED");
-                            link_tx_send_state_event(current_state);
-                        } else {
-                            // Already armed: confirm anyway so the client does not hang
-                            // waiting for EVENT:CMD_EXECUTED:SYS_ARM
-                            serial_line("EVENT:CMD_EXECUTED:SYS_ARM");
-                            Serial.flush();
-                        }
-                        break;
-
-                    case CMD_SYS_DISARM:
-                        if (current_state != STATE_DISARMED) {
-                            current_state = STATE_DISARMED;
-                            // C-1: the motor is owned by MotorTask. Notify it instead of
-                            // touching the hardware from this task; otherwise MotorTask
-                            // overwrites the stop within 10 ms.
-                            motor_task_trigger_emergency();
-                            mailbox_write(steer_mb, TOPIC_STEER, CMD_STOP, 0, 100);
-                            serial_line("EVENT:CMD_EXECUTED:SYS_DISARM");
-                            Serial.flush();
-                            serial_line("[SupervisorTask] System DISARMED");
-                            link_tx_send_state_event(current_state);
-                        }
-                        break;
-                        
-                    default:
-                        break;
-                }
+static void handle_request(request_t req, bool estop)
+{
+    switch (req)
+    {
+    case REQ_ARM:
+        if (current_state == STATE_DISARMED || current_state == STATE_FAULT)
+        {
+            if (estop)
+            {
+                event_line("EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE");
+                return;
             }
+            supervisor_feed_watchdog(); // fresh start for the watchdog
+            set_state(supervisor_stop_requested() ? STATE_STOPPED : STATE_RUNNING);
         }
-        
-        // Check E-STOP GPIO
-        bool estop_current = estop_is_triggered();
-        if (estop_current && !estop_triggered) {
-            serial_line("EVENT:ESTOP_TRIGGERED:GPIO");
-            Serial.flush();
-            serial_line("[SupervisorTask] E-STOP triggered via GPIO!");
-            estop_triggered = true;
-            current_state = STATE_FAULT;
-            motor_task_trigger_emergency();
-            mailbox_write(steer_mb, TOPIC_STEER, CMD_STOP, 0, 100);
-        } else if (!estop_current && estop_triggered) {
-            serial_line("EVENT:ESTOP_RELEASED");
-            Serial.flush();
-            serial_line("[SupervisorTask] E-STOP released");
-            estop_triggered = false;
-        }
-        
-        // Watchdog: Check heartbeat timeout.
-        // C-4: it must cover every armed state, whoever is driving.
-        if (current_state != STATE_DISARMED && current_state != STATE_FAULT) {
-            uint32_t heartbeat_age;
-            if (heartbeat_age_ms(&heartbeat_age)) {
-                if (heartbeat_age > WATCHDOG_TIMEOUT_MS) {
-                    serial_line("EVENT:WATCHDOG_TIMEOUT");
-                    Serial.flush();
-                    serial_linef("[SupervisorTask] Watchdog timeout! Heartbeat age: %lu ms",
-                                 (unsigned long)heartbeat_age);
-                    current_state = STATE_FAULT;
-                    motor_task_trigger_emergency();
-                    mailbox_write(steer_mb, TOPIC_STEER, CMD_STOP, 0, 100);
-                }
-            }
-        }
-        
-        // State machine transitions
-        // ARMED automatically transitions to RUNNING
-        if (current_state == STATE_ARMED) {
-            current_state = STATE_RUNNING;
-            serial_line("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");
-            Serial.flush();
+        // Already armed: confirm anyway so the client does not hang waiting.
+        event_line("EVENT:CMD_EXECUTED:SYS_ARM");
+        break;
+    case REQ_DISARM:
+        set_state(STATE_DISARMED);
+        event_line("EVENT:CMD_EXECUTED:SYS_DISARM"); // also if already disarmed
+        break;
+    default:
+        break;
+    }
+}
+
+void supervisor_task(void *pvParameters)
+{
+    (void)pvParameters;
+    bool estop_was = false;
+
+    log_line("[Supervisor] started");
+    event_linef("EVENT:STATE_CHANGED:%s", supervisor_state_name(current_state));
+
+    while (1)
+    {
+        const bool estop = estop_is_triggered();
+
+        for (request_t req = pop_request(); req != REQ_NONE; req = pop_request())
+        {
+            handle_request(req, estop);
         }
 
-        // RUNNING <-> STOPPED follows the stop requests. MotorTask and SteerTask
-        // already hold still as soon as a request appears; this makes it a
-        // state the client can see.
+        if (estop && !estop_was)
+        {
+            event_line("EVENT:ESTOP_TRIGGERED:GPIO");
+            set_state(STATE_FAULT);
+        }
+        else if (!estop && estop_was)
+        {
+            event_line("EVENT:ESTOP_RELEASED");
+        }
+        estop_was = estop;
+
+        // Watchdog: covers every armed state.
+        uint32_t age;
+        if ((current_state == STATE_RUNNING || current_state == STATE_STOPPED) &&
+            heartbeat_age_ms(&age) && age > WATCHDOG_TIMEOUT_MS)
+        {
+            event_line("EVENT:WATCHDOG_TIMEOUT");
+            log_linef("[Supervisor] watchdog: heartbeat age %lu ms", (unsigned long)age);
+            set_state(STATE_FAULT);
+        }
+
+        // RUNNING <-> STOPPED follows the stop requests. ControlTask already
+        // reads supervisor_stop_requested() directly; this makes it visible.
         const bool stop = supervisor_stop_requested();
-        if (current_state == STATE_RUNNING && stop) {
-            current_state = STATE_STOPPED;
-            serial_linef("EVENT:STATE_AUTO_TRANSITION:RUNNING->STOPPED:%s",
-                         stop_latched ? "SYS_STOP" : "OBSTACLE");
-            Serial.flush();
-        } else if (current_state == STATE_STOPPED && !stop) {
-            current_state = STATE_RUNNING;
-            serial_line("EVENT:STATE_AUTO_TRANSITION:STOPPED->RUNNING");
-            Serial.flush();
+        if (current_state == STATE_RUNNING && stop)
+        {
+            log_linef("[Supervisor] STOPPED by %s", stop_latched ? "SYS_STOP" : "OBSTACLE");
+            set_state(STATE_STOPPED);
         }
-        
-        // Send event if state changed (for automatic transitions)
-        if (current_state != previous_state) {
-            link_tx_send_state_event(current_state);
-            previous_state = current_state;
+        else if (current_state == STATE_STOPPED && !stop)
+        {
+            set_state(STATE_RUNNING);
         }
-        
-        // Periodic STATUS messages removed - use M:GET_STATUS:0 to request status on demand
-        // or use telemetry_monitor.py to see all telemetry
-        
+
         vTaskDelay(pdMS_TO_TICKS(SUPERVISOR_TASK_PERIOD_MS));
     }
 }
 
-void supervisor_update_heartbeat(void) {
-    last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+void supervisor_feed_watchdog(void)
+{
+    __atomic_store_n(&last_heartbeat_ms, now_ms(), __ATOMIC_RELEASE);
+    __atomic_store_n(&have_heartbeat, true, __ATOMIC_RELEASE);
 }
-
-void supervisor_set_obstacle(bool obstacle) {
+void supervisor_request_arm(void) { push_request(REQ_ARM); }
+void supervisor_request_disarm(void)
+{
+    // Stop now; the state change follows on the next supervisor cycle.
+    control_drop_speed();
+    push_request(REQ_DISARM);
+}
+// Both stop requests wake ControlTask so it brakes now, not on its next cycle.
+void supervisor_set_obstacle(bool obstacle)
+{
     obstacle_active = obstacle;
+    control_wake();
 }
+bool supervisor_stop_requested(void) { return obstacle_active || stop_latched; }
+bool supervisor_obstacle_active(void) { return obstacle_active; }
+bool supervisor_stop_latched(void) { return stop_latched; }
+system_state_t supervisor_get_state(void) { return current_state; }
 
-// Called only from LinkRxTask, so the read-then-write is not racy.
-bool supervisor_latch_stop(void) {
+// Only called from LinkRxTask, so the read-then-write is not racy.
+bool supervisor_latch_stop(void)
+{
     const bool changed = !stop_latched;
     stop_latched = true;
+    control_wake();
     return changed;
 }
 
-bool supervisor_release_stop(void) {
+bool supervisor_release_stop(void)
+{
     const bool changed = stop_latched;
     stop_latched = false;
     return changed;
 }
 
-bool supervisor_stop_requested(void) {
-    return obstacle_active || stop_latched;
-}
-
-const char *supervisor_state_name(system_state_t state) {
-    switch (state) {
-        case STATE_DISARMED: return "DISARMED";
-        case STATE_ARMED:    return "ARMED";
-        case STATE_RUNNING:  return "RUNNING";
-        case STATE_STOPPED:  return "STOPPED";
-        default:             return "FAULT";
+const char *supervisor_state_name(system_state_t state)
+{
+    switch (state)
+    {
+    case STATE_DISARMED: return "DISARMED";
+    case STATE_RUNNING:  return "RUNNING";
+    case STATE_STOPPED:  return "STOPPED";
+    default:             return "FAULT";
     }
-}
-
-system_state_t supervisor_get_state(void) {
-    return current_state;
 }
