@@ -213,6 +213,18 @@ void control_task(void *pvParameters)
         const bool can_move = armed && !latched && !toward_obstacle;
         const bool can_steer = armed && !latched;
 
+#ifdef ULTRASONIC_DEBUG
+        static bool was_toward_obstacle = false;
+        if (toward_obstacle != was_toward_obstacle)
+        {
+            was_toward_obstacle = toward_obstacle;
+            if (toward_obstacle)
+                log_linef("[Control] >>> MOTOR FRENADO por obstaculo (velocidad %u -> 0)", (unsigned)speed);
+            else
+                log_line("[Control] >>> obstaculo liberado: espera un C:SET_SPEED nuevo para moverse");
+        }
+#endif
+
         // ---- Traction: act first, report after ------------------------
         const uint8_t old_speed = speed;
         const char *rejected = NULL;

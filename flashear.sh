@@ -13,7 +13,7 @@
 #   Por eso este script NUNCA confia en la autodeteccion: siempre pasa el puerto
 #   de forma explicita con --upload-port / --port. Ese es el punto central del script.
 #
-# Uso:  ./flashear.sh [-m|--monitor] [-c|--clean] [-p|--port <dev>] [-h|--help]
+# Uso:  ./flashear.sh [-m|--monitor] [-c|--clean] [-p|--port <dev>] [-e|--env <env>] [-h|--help]
 #
 
 set -euo pipefail
@@ -82,6 +82,10 @@ OPCIONES
     -p, --port <dev>     Fuerza el puerto serie a usar, por ejemplo:
                              ./flashear.sh --port /dev/ttyCH341USB0
                          Tiene prioridad sobre la deteccion automatica.
+    -e, --env <env>      Entorno de platformio.ini a usar. Por defecto el primero
+                         (esp32doit-devkit-v1, el del auto). Para la prueba de
+                         banco del freno por ultrasonico:
+                             ./flashear.sh --env esp32doit-devkit-v1-usdebug
     -h, --help           Muestra esta ayuda y sale.
 
 VARIABLES DE ENTORNO
@@ -110,6 +114,7 @@ AYUDA
 ABRIR_MONITOR=0
 BUILD_LIMPIO=0
 PUERTO_FORZADO="${ESP32_PORT:-}"
+ENV_FORZADO=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -129,6 +134,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port=*)
             PUERTO_FORZADO="${1#*=}"
+            shift
+            ;;
+        -e|--env)
+            [[ $# -ge 2 ]] || morir "La opcion '$1' necesita un argumento." \
+                "Ejemplo: ./flashear.sh --env esp32doit-devkit-v1-usdebug"
+            ENV_FORZADO="$2"
+            shift 2
+            ;;
+        --env=*)
+            ENV_FORZADO="${1#*=}"
             shift
             ;;
         -h|--help)
@@ -155,11 +170,19 @@ titulo "Verificando el proyecto"
     "Este script tiene que vivir en la raiz del proyecto PlatformIO." \
     "Movelo junto a platformio.ini y volve a ejecutarlo."
 
-# Sacamos el nombre del entorno desde platformio.ini (primer [env:...]).
-PIO_ENV="$(sed -n 's/^[[:space:]]*\[env:\([^]]*\)\].*/\1/p' "$INI_FILE" | head -n1)"
+# Sacamos el nombre del entorno desde platformio.ini (primer [env:...]),
+# salvo que se haya pedido otro con --env.
+ENTORNOS="$(sed -n 's/^[[:space:]]*\[env:\([^]]*\)\].*/\1/p' "$INI_FILE")"
+PIO_ENV="$(printf '%s\n' "$ENTORNOS" | head -n1)"
 [[ -n "$PIO_ENV" ]] || morir \
     "No pude leer ningun entorno '[env:...]' de ${INI_FILE}." \
     "Revisa que platformio.ini no este corrupto."
+if [[ -n "$ENV_FORZADO" ]]; then
+    printf '%s\n' "$ENTORNOS" | grep -qxF "$ENV_FORZADO" || morir \
+        "El entorno '${ENV_FORZADO}' no existe en ${INI_FILE}." \
+        "Entornos disponibles: $(printf '%s ' $ENTORNOS)"
+    PIO_ENV="$ENV_FORZADO"
+fi
 
 ok "Proyecto: ${PROJECT_DIR}"
 ok "Entorno PlatformIO: ${PIO_ENV}"
