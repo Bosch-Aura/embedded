@@ -4,6 +4,7 @@
 #include "messages.h"
 #include "serial_out.h"
 #include "supervisor_task.h"
+#include "ultrasonic_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <Arduino.h>
@@ -127,6 +128,11 @@ static bool dispatch(char *line)
             {
                 event_line("EVENT:CMD_EXECUTED:SYS_STOP");
             }
+            return true;
+        }
+        if (strcmp(cmd, "OBSTACLE_RESET") == 0)
+        {
+            ultrasonic_request_reset();
             return true;
         }
         if (strcmp(cmd, "SYS_RESUME") == 0)

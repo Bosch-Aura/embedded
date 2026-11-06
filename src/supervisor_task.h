@@ -29,7 +29,9 @@ void supervisor_request_disarm(void);
 void supervisor_set_obstacle(bool obstacle); // UltrasonicTask
 bool supervisor_latch_stop(void);            // M:SYS_STOP:0
 bool supervisor_release_stop(void);          // M:SYS_RESUME:0
-bool supervisor_stop_requested(void);
+bool supervisor_stop_requested(void);   // either of the two below
+bool supervisor_obstacle_active(void);  // ultrasonic hold: blocks motion toward the sensor only
+bool supervisor_stop_latched(void);     // SYS_STOP: blocks everything
 
 #ifdef __cplusplus
 }

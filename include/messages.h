@@ -14,7 +14,8 @@ extern "C" {
 typedef enum {
     STATE_DISARMED,
     STATE_RUNNING,
-    STATE_STOPPED, // armed but held: speed 0, servo frozen where it is
+    STATE_STOPPED, // armed but held: SYS_STOP (nothing moves, servo frozen) or
+                   // obstacle (only motion toward the sensor is blocked)
     STATE_FAULT    // E-STOP or lost link; only M:SYS_ARM:0 leaves it
 } system_state_t;
 

@@ -14,6 +14,12 @@
 #define MOTOR_DIRECTION_DEADTIME_MS 60
 #endif
 
+// Where the ultrasonic sensor looks. An obstacle blocks only motion toward it,
+// so the car can back away from something in front. 0 = sensor at the rear.
+#ifndef ULTRASONIC_FACING_FORWARD
+#define ULTRASONIC_FACING_FORWARD 1
+#endif
+
 // ---------------------------------------------------------------------------
 // Commands from LinkRxTask (core 1) to ControlTask (core 0).
 // A sequence number per command marks it as new; ControlTask consumes it once.
@@ -163,9 +169,15 @@ void control_task(void *pvParameters)
 
         const system_state_t state = supervisor_get_state();
         const bool armed = (state == STATE_RUNNING || state == STATE_STOPPED);
-        // The stop flag is read directly (not via the STOPPED state) so the
+        // The stop flags are read directly (not via the STOPPED state) so the
         // brake does not wait for the next supervisor cycle.
-        const bool can_move = armed && !supervisor_stop_requested();
+        //   SYS_STOP latch: nothing moves, servo frozen.
+        //   obstacle:       only motion toward the sensor is blocked.
+        const bool latched = supervisor_stop_latched();
+        const bool toward_obstacle = supervisor_obstacle_active() &&
+                                     (c.forward == (ULTRASONIC_FACING_FORWARD != 0));
+        const bool can_move = armed && !latched && !toward_obstacle;
+        const bool can_steer = armed && !latched;
 
         // ---- Traction --------------------------------------------------
         if (c.brake)
@@ -199,17 +211,19 @@ void control_task(void *pvParameters)
         }
         else
         {
-            // Fail-safe: anything but "armed and not stopped" brakes AND clears
-            // the latched speed, so the car never restarts by itself when the
-            // stop clears. The Jetson has to send a new C:SET_SPEED.
+            // Fail-safe: not armed, SYS_STOP, or heading toward an obstacle
+            // brakes AND clears the latched speed, so the car never restarts by
+            // itself when the stop clears. The Jetson has to send a new
+            // C:SET_SPEED (backing away from an obstacle is allowed).
             speed = 0;
             traction_brake();
         }
 
         // ---- Steering --------------------------------------------------
         // Not armed: center, and forget any pending command.
-        // Stopped: freeze where it is, but KEEP the last angle asked for and
-        // apply it on resume. The Jetson only sends C:SET_STEER when the angle
+        // SYS_STOP: freeze where it is, but KEEP the last angle asked for and
+        // apply it on resume. An obstacle does not freeze the servo: the car
+        // may be steering while it backs away. The Jetson only sends C:SET_STEER when the angle
         // changes, so one dropped while stopped would never be re-sent.
         // Moving the servo on resume is harmless: speed is 0 until a new
         // C:SET_SPEED arrives.
@@ -224,7 +238,7 @@ void control_task(void *pvParameters)
             target = SERVO_CENTER;
             steer_pending = false;
         }
-        else if (can_move && steer_pending)
+        else if (can_steer && steer_pending)
         {
             target = (uint16_t)clamp(pending_angle, SERVO_LEFT, SERVO_RIGHT);
             steer_pending = false;

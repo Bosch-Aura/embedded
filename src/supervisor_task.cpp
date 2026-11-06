@@ -152,6 +152,8 @@ void supervisor_set_obstacle(bool obstacle)
     control_wake();
 }
 bool supervisor_stop_requested(void) { return obstacle_active || stop_latched; }
+bool supervisor_obstacle_active(void) { return obstacle_active; }
+bool supervisor_stop_latched(void) { return stop_latched; }
 system_state_t supervisor_get_state(void) { return current_state; }
 
 // Only called from LinkRxTask, so the read-then-write is not racy.
