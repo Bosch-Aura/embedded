@@ -122,7 +122,12 @@ bool estop_is_triggered(void) {
     return digitalRead(GPIO_ESTOP) == LOW;
 }
 
+static volatile uint32_t last_echo_us = 0; // debug only: width of the last echo
+
+uint32_t ultrasonic_last_echo_us(void) { return last_echo_us; }
+
 uint16_t ultrasonic_read_cm(void) {
+    last_echo_us = 0;
 #ifndef ULTRASONIC_USE_PULSEIN
     // Only the ultrasonic task calls this. Clear any stale notification, arm
     // the ISR, then trigger.
@@ -150,6 +155,7 @@ uint16_t ultrasonic_read_cm(void) {
 #else
     const uint32_t duration = pulseIn(GPIO_ULTRASONIC_ECHO, HIGH, ULTRASONIC_ECHO_TIMEOUT_MS * 1000UL);
 #endif
+    last_echo_us = duration;
     if (duration == 0) {
         return 0; // no echo
     }

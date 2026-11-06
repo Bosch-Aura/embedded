@@ -149,6 +149,7 @@ extern "C"
 
     // Ultrasonic sensor (HC-SR04) reading
     uint16_t ultrasonic_read_cm(void); // Returns distance in cm, 0 if error/timeout
+    uint32_t ultrasonic_last_echo_us(void); // Echo width of the last read, 0 if none (debug)
 
 #ifdef __cplusplus
 }
