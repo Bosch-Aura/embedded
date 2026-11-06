@@ -3,7 +3,6 @@
 #include "serial_out.h"
 #include <ESP32Servo.h>
 
-static const char *TAG = "hardware";
 static Servo steerServo;
 
 void hardware_init(void) {
@@ -11,8 +10,6 @@ void hardware_init(void) {
     pinMode(GPIO_MOTOR_IN3, OUTPUT);
     pinMode(GPIO_MOTOR_IN4, OUTPUT);
     pinMode(GPIO_MOTOR_ENB, OUTPUT);
-    pinMode(GPIO_HEADLIGHTS, OUTPUT);
-    pinMode(GPIO_REVERSE_LIGHTS, OUTPUT);
     pinMode(GPIO_LED_BUILTIN, OUTPUT);
     pinMode(GPIO_ESTOP, INPUT_PULLUP);
     
@@ -21,33 +18,28 @@ void hardware_init(void) {
     pinMode(GPIO_ULTRASONIC_ECHO, INPUT);
     digitalWrite(GPIO_ULTRASONIC_TRIG, LOW);
     
-    // LDR is analog input, no pinMode needed for GPIO 35
-    
     // Initialize GPIO states
     digitalWrite(GPIO_MOTOR_IN3, LOW);
     digitalWrite(GPIO_MOTOR_IN4, LOW);
-    digitalWrite(GPIO_HEADLIGHTS, LOW);
-    digitalWrite(GPIO_REVERSE_LIGHTS, LOW);
     digitalWrite(GPIO_LED_BUILTIN, LOW);
     
-    // Initialize servo
+    // Servo, centered
     steerServo.setPeriodHertz(SERVO_PWM_FREQ_HZ);
     steerServo.attach(GPIO_SERVO, 500, 2500);
     steerServo.write(SERVO_CENTER);
-    
-    // Initialize Serial1 for UART communication
+
+    // UART to the Jetson
     Serial1.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
-    
-    // Center servo on startup
-    steer_set_angle(SERVO_CENTER);
-    
-    serial_line("Hardware initialized");
+
+    log_line("Hardware initialized");
 }
 
 void motor_set_speed(uint8_t speed) {
+#if MOTOR_SPEED_MAX < 255 // hardware.env may lower the cap
     if (speed > MOTOR_SPEED_MAX) {
         speed = MOTOR_SPEED_MAX;
     }
+#endif
     analogWrite(GPIO_MOTOR_ENB, speed);
 }
 
@@ -69,18 +61,6 @@ void motor_stop(void) {
 
 void steer_set_angle(uint16_t angle) {
     steerServo.write(angle);
-}
-
-void lights_set_headlights(bool on) {
-    digitalWrite(GPIO_HEADLIGHTS, on ? HIGH : LOW);
-}
-
-void lights_set_reverse(bool on) {
-    digitalWrite(GPIO_REVERSE_LIGHTS, on ? HIGH : LOW);
-}
-
-uint16_t ldr_read(void) {
-    return analogRead(GPIO_LDR);
 }
 
 bool estop_is_triggered(void) {

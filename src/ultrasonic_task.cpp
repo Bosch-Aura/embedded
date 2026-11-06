@@ -28,20 +28,17 @@
 #define ULTRASONIC_NO_ECHO_CLEAR_COUNT 10
 #endif
 
-// An obstacle puts the system in STOPPED while it is there: speed 0 and the
-// servo frozen. It does not latch FAULT and does not disarm. FAULT made sense as a last resort, but an
-// obstacle ahead is a normal driving situation (the car in front, a pedestrian,
-// parking): with FAULT the vehicle stayed dead until someone re-armed it by
-// hand. Whether to drive on once the way is clear is the Jetson's decision: the
-// latched speed is cleared while braking, so nothing moves until a new
-// C:SET_SPEED arrives.
+// An obstacle puts the system in STOPPED while it is there (speed 0, servo
+// frozen). It is a normal driving situation, so it does not disarm or FAULT.
+// Driving on once the way is clear is the Jetson's call: the latched speed is
+// cleared while braking, so nothing moves until a new C:SET_SPEED arrives.
 void ultrasonic_task(void *pvParameters) {
     uint8_t near_count = 0;     // valid readings under the threshold
     uint8_t far_count = 0;      // valid readings past threshold + margin
     uint8_t no_echo_count = 0;  // consecutive readings with no echo
     bool obstacle = false;
 
-    serial_line("[UltrasonicTask] Ultrasonic obstacle detection task started");
+    log_line("[Ultrasonic] started");
 
     while (1) {
         uint16_t distance_cm = ultrasonic_read_cm();
@@ -62,8 +59,7 @@ void ultrasonic_task(void *pvParameters) {
                     near_count = 0;
                     far_count = 0;
                     supervisor_set_obstacle(true);
-                    serial_linef("EVENT:OBSTACLE_DETECTED:%u", (unsigned)distance_cm);
-                    Serial.flush();
+                    event_linef("EVENT:OBSTACLE_DETECTED:%u", (unsigned)distance_cm);
                 }
             } else if (distance_cm > 0 || no_echo_count >= ULTRASONIC_NO_ECHO_CLEAR_COUNT) {
                 // A valid far reading, or a long silence: nothing close
@@ -81,8 +77,7 @@ void ultrasonic_task(void *pvParameters) {
                 far_count = 0;
                 near_count = 0;
                 supervisor_set_obstacle(false);
-                serial_line("EVENT:OBSTACLE_CLEARED");
-                Serial.flush();
+                event_line("EVENT:OBSTACLE_CLEARED");
             }
         }
 

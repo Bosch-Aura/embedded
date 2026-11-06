@@ -5,24 +5,23 @@
 extern "C" {
 #endif
 
-// Single exit point for every line written to Serial (USB).
+// Single exit point for every line the firmware writes.
 //
-// Several tasks on both cores print to the same port. Serial.println() is TWO
-// writes (the text, then "\r\n"), so another task could slip its own line in
-// between and the Brain received two events glued together, e.g.
-//   EVENT:CMD_EXECUTED:EMERGENCY_BRAKEEVENT:STATE_CHANGED:FAULT
-// which it can only throw away. Here each line is formatted first and written
-// whole while holding a mutex, so lines never interleave.
+// Tasks on both cores print. Each line is formatted first and written whole
+// under a mutex, otherwise two events can come out glued together
+// ("EVENT:...BRAKE_NOWEVENT:STATE_CHANGED:FAULT") and the Jetson drops both.
+//
+//   log_*   -> USB only. Debug text.
+//   event_* -> USB AND the UART to the Jetson. Everything the Jetson must see
+//              (state changes, obstacles, watchdog) goes through here, so it
+//              arrives whichever of the two ports the Jetson is plugged into.
 
-// Call once, right after Serial.begin() and before any task exists.
-void serial_out_init(void);
+void serial_out_init(void); // after Serial.begin(), before any task exists
 
-// Writes `text` followed by "\r\n" as one atomic line.
-void serial_line(const char *text);
-
-// printf-style version of serial_line(). Lines longer than the internal
-// buffer are truncated, never split.
-void serial_linef(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void log_line(const char *text);
+void log_linef(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void event_line(const char *text);
+void event_linef(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #ifdef __cplusplus
 }

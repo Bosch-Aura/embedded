@@ -1,51 +1,24 @@
 #ifndef MESSAGES_H
 #define MESSAGES_H
 
-#include <stdint.h>
-#include <stdbool.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Command types
-typedef enum {
-    CMD_SET_SPEED,
-    CMD_SET_STEER,
-    CMD_BRAKE_NOW,
-    CMD_STOP,
-    CMD_SYS_ARM,
-    CMD_SYS_DISARM,
-    CMD_LIGHTS_ON,
-    CMD_LIGHTS_OFF,
-    CMD_LIGHTS_AUTO,
-    CMD_UNKNOWN
-} command_type_t;
-
-// Topics/channels
-typedef enum {
-    TOPIC_MOTOR,
-    TOPIC_STEER,
-    TOPIC_LIGHTS,
-    TOPIC_SYSTEM,
-    TOPIC_EMERGENCY,
-    TOPIC_CONTROL,
-    TOPIC_MANAGEMENT
-} topic_t;
-
-// System states
+// System states. The names travel to the Jetson as EVENT:STATE_CHANGED:<name>.
+//
+//   DISARMED --SYS_ARM--> RUNNING <--> STOPPED     (obstacle or SYS_STOP)
+//      ^                     |            |
+//      +------SYS_DISARM-----+------------+
+//   any state --E-STOP / watchdog--> FAULT --SYS_ARM--> RUNNING
 typedef enum {
     STATE_DISARMED,
-    STATE_ARMED,
     STATE_RUNNING,
-    STATE_FAULT,
-    // Armed but held still: speed 0 and the servo frozen where it is, while an
-    // obstacle is ahead or after M:SYS_STOP:0 (latched until M:SYS_RESUME:0).
-    // Returns to RUNNING by itself when neither is active; no re-arm needed.
-    STATE_STOPPED
+    STATE_STOPPED, // armed but held: speed 0, servo frozen where it is
+    STATE_FAULT    // E-STOP or lost link; only M:SYS_ARM:0 leaves it
 } system_state_t;
 
-// UART channel prefixes
+// Link channels: <CHANNEL>:<COMMAND>[:<VALUE>]\n
 #define CHANNEL_EMERGENCY 'E'
 #define CHANNEL_CONTROL 'C'
 #define CHANNEL_MANAGEMENT 'M'
@@ -55,6 +28,3 @@ typedef enum {
 #endif
 
 #endif // MESSAGES_H
-
-
-

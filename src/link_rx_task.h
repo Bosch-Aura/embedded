@@ -1,19 +1,11 @@
 #ifndef LINK_RX_TASK_H
 #define LINK_RX_TASK_H
 
-#include "mailbox.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct {
-    mailbox_t *motor_mailbox;
-    mailbox_t *steer_mailbox;
-    mailbox_t *lights_mailbox;
-    mailbox_t *supervisor_mailbox;
-} link_rx_params_t;
-
+// Reads commands from USB and from the UART to the Jetson and dispatches them.
 void link_rx_task(void *pvParameters);
 
 #ifdef __cplusplus
@@ -21,6 +13,3 @@ void link_rx_task(void *pvParameters);
 #endif
 
 #endif // LINK_RX_TASK_H
-
-
-
