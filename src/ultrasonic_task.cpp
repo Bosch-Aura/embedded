@@ -57,6 +57,14 @@
 #define ULTRASONIC_SILENT_MS 2000
 #endif
 
+// -DULTRASONIC_DEBUG: one USB log line per reading (never sent to the Jetson
+// UART) plus the brake/release decisions, to check the sensor on the bench.
+#ifdef ULTRASONIC_DEBUG
+#define US_DEBUG(...) log_linef(__VA_ARGS__)
+#else
+#define US_DEBUG(...) do {} while (0)
+#endif
+
 static volatile bool reset_requested = false;
 
 void ultrasonic_request_reset(void)
@@ -87,6 +95,7 @@ void ultrasonic_task(void *pvParameters)
             if (blocked)
             {
                 blocked = false;
+                US_DEBUG("[US] >>> LIBERADO por OBSTACLE_RESET");
                 supervisor_set_obstacle(false);
                 event_line("EVENT:OBSTACLE_CLEARED");
             }
@@ -120,10 +129,19 @@ void ultrasonic_task(void *pvParameters)
                 last_run_ms = now;
             }
 
+            US_DEBUG("[US] cm=%u echo_us=%lu %s estado=%s run=%u/%u%s", (unsigned)cm,
+                     (unsigned long)ultrasonic_last_echo_us(), near ? "CERCA" : "LEJOS",
+                     blocked ? "BLOQUEADO" : "LIBRE", (unsigned)run,
+                     (unsigned)ULTRASONIC_DEBOUNCE_COUNT,
+                     run == 0 ? "" : blocked ? " -> liberaria" : " -> frenaria");
+
             if (run >= ULTRASONIC_DEBOUNCE_COUNT)
             {
                 blocked = near;
                 run = 0;
+                US_DEBUG(blocked ? "[US] >>> FRENO: obstaculo a %u cm (umbral %u)"
+                                 : "[US] >>> LIBERADO: camino libre a %u cm (umbral %u)",
+                         (unsigned)cm, (unsigned)ULTRASONIC_OBSTACLE_THRESHOLD_CM);
                 supervisor_set_obstacle(blocked);
                 if (blocked)
                 {
@@ -135,7 +153,16 @@ void ultrasonic_task(void *pvParameters)
                 }
             }
         }
-        else if (!silent && now - last_valid_ms >= ULTRASONIC_SILENT_MS)
+        else
+        {
+            const uint32_t echo_us = ultrasonic_last_echo_us();
+            US_DEBUG("[US] INVALIDA (%s echo_us=%lu ~%lu cm) estado=%s run=%u/%u",
+                     echo_us == 0 ? "sin eco" : "fuera de rango", (unsigned long)echo_us,
+                     (unsigned long)(echo_us / 58), blocked ? "BLOQUEADO" : "LIBRE",
+                     (unsigned)run, (unsigned)ULTRASONIC_DEBOUNCE_COUNT);
+        }
+
+        if (cm == 0 && !silent && now - last_valid_ms >= ULTRASONIC_SILENT_MS)
         {
             silent = true;
             event_line("EVENT:ULTRASONIC_SILENT");

@@ -23,6 +23,12 @@ pio run -e esp32doit-devkit-v1 -t upload    # flashear
 El entorno `esp32doit-devkit-v1-debug` espera 3 s al arrancar para que se conecte el monitor serie. No se
 usa en el auto.
 
+El entorno `esp32doit-devkit-v1-usdebug` imprime por USB cada lectura del ultrasónico y cada decisión de
+frenar o liberar (ver [Prueba de banco del freno](#prueba-de-banco-del-freno-por-ultrasónico)). Tampoco se
+usa en el auto.
+
+**Velocidad mínima: `C:SET_SPEED:130`.** Por debajo el motor zumba pero no arranca.
+
 ## Arquitectura
 
 Cuatro tareas FreeRTOS. Cada recurso de hardware tiene **un solo dueño**, y los estados los escribe una
@@ -97,6 +103,35 @@ ya encontrados y ultrasonido con pérdida de ecos, con los dos drivers de eco. `
 todo. Ver [`test/sim/README.md`](test/sim/README.md).
 
 `test/python/test_uart_simulator.py` es una consola interactiva para mandarle comandos a la placa real.
+
+### Prueba de banco del freno por ultrasónico
+
+Comprueba en la placa real que el sensor mide bien y que el auto frena cuando tiene que frenar, sin la
+Jetson. **Las ruedas giran: levantá el auto.**
+
+```bash
+./flashear.sh --env esp32doit-devkit-v1-usdebug   # firmware con logs del ultrasónico
+python3 scripts/prueba_freno.py                   # arma, avanza a 150 y muestra los logs
+```
+
+El script hace de Brain por el USB (`SYS_ARM`, `SET_DIR:1` y `SET_SPEED` a 10 Hz, que también alimenta el
+watchdog), imprime todo lo que dice la placa con hora y lo guarda en `prueba_freno_<fecha>.txt`. Al acercar
+un objeto a menos de 30 cm tiene que aparecer:
+
+```
+[US] >>> FRENO: obstaculo a 25 cm (umbral 30)
+EVENT:OBSTACLE_DETECTED:25
+[Control] >>> MOTOR FRENADO por obstaculo (velocidad 150 -> 0)
+```
+
+- `--velocidad N`: PWM a mandar. **El mínimo para que se mueva es 130**; con menos el motor zumba y no gira.
+- `--sin-reanudar`: después del primer freno deja de mandar velocidad (solo `PING`), para comprobar que el
+  auto no arranca solo al despejarse.
+- Ctrl+C manda `SET_SPEED:0` y `SYS_DISARM` antes de salir.
+
+Cerrá cualquier monitor serie antes: el puerto lo tiene que tener solo el script. Para ver solo los logs,
+sin mover nada: `pio device monitor --port /dev/ttyCH341USB0 --baud 115200 --rts 0 --dtr 0`. Después de la
+prueba, volvé a flashear el firmware normal con `./flashear.sh`.
 
 ---
 
