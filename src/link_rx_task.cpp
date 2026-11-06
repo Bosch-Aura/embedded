@@ -124,10 +124,8 @@ static bool dispatch(char *line)
         }
         if (strcmp(cmd, "SYS_STOP") == 0)
         {
-            if (supervisor_latch_stop())
-            {
-                event_line("EVENT:CMD_EXECUTED:SYS_STOP");
-            }
+            supervisor_latch_stop();
+            event_line("EVENT:CMD_EXECUTED:SYS_STOP"); // also if already latched
             return true;
         }
         if (strcmp(cmd, "OBSTACLE_RESET") == 0)
@@ -140,10 +138,8 @@ static bool dispatch(char *line)
             // Releases the latch only. Nothing latched resumes: the car moves
             // again with the next C:SET_SPEED, and stays STOPPED while an
             // obstacle is still ahead.
-            if (supervisor_release_stop())
-            {
-                event_line("EVENT:CMD_EXECUTED:SYS_RESUME");
-            }
+            supervisor_release_stop();
+            event_line("EVENT:CMD_EXECUTED:SYS_RESUME"); // also if nothing was latched
             return true;
         }
         break;

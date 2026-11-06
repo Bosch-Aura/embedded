@@ -17,8 +17,8 @@ const char *supervisor_state_name(system_state_t state);
 
 // LinkRxTask: every understood command keeps the link alive.
 void supervisor_feed_watchdog(void);
-// LinkRxTask: M:SYS_ARM:0 / M:SYS_DISARM:0. Handled on the next supervisor
-// cycle (<= 20 ms); the last request wins.
+// LinkRxTask: M:SYS_ARM:0 / M:SYS_DISARM:0. Handled in order on the next
+// supervisor cycle (<= 20 ms). DISARM drops the latched speed right away.
 void supervisor_request_arm(void);
 void supervisor_request_disarm(void);
 

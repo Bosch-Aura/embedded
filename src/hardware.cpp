@@ -2,6 +2,55 @@
 #include "hardware.h"
 #include "serial_out.h"
 #include <ESP32Servo.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+// HC-SR04 echo measurement.
+//
+// Default: an interrupt on both edges of ECHO timestamps the pulse, and the
+// reading task SLEEPS until the falling edge (or the timeout). pulseIn() busy-
+// waited up to 30 ms at priority 5 on core 0, holding ControlTask off the CPU
+// for that long on every reading without an echo.
+//
+// -DULTRASONIC_USE_PULSEIN goes back to pulseIn(), in case the interrupt
+// version misbehaves on some board.
+#ifndef ULTRASONIC_ECHO_TIMEOUT_MS
+#define ULTRASONIC_ECHO_TIMEOUT_MS 30 // ~5 m round trip; past the 4 m range
+#endif
+
+#ifndef ULTRASONIC_USE_PULSEIN
+static volatile uint32_t echo_rise_us = 0;
+static volatile uint32_t echo_width_us = 0;
+static volatile bool echo_rising_seen = false;
+static volatile bool echo_waiting = false; // a reading is waiting for its edge
+static TaskHandle_t volatile echo_waiter = NULL;
+
+static void ARDUINO_ISR_ATTR echo_isr(void)
+{
+    const uint32_t t = micros();
+    if (digitalRead(GPIO_ULTRASONIC_ECHO))
+    {
+        echo_rise_us = t;
+        echo_rising_seen = true;
+        return;
+    }
+    // Falling edge. Ignore it if nobody is waiting (the reading already timed
+    // out, e.g. the ~38 ms "nothing in range" pulse of the HC-SR04) or if its
+    // rising edge belongs to an earlier trigger.
+    if (!echo_waiting || !echo_rising_seen)
+    {
+        return;
+    }
+    echo_width_us = t - echo_rise_us;
+    echo_waiting = false;
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(echo_waiter, &woken);
+    if (woken)
+    {
+        portYIELD_FROM_ISR();
+    }
+}
+#endif
 
 static Servo steerServo;
 
@@ -17,7 +66,10 @@ void hardware_init(void) {
     pinMode(GPIO_ULTRASONIC_TRIG, OUTPUT);
     pinMode(GPIO_ULTRASONIC_ECHO, INPUT);
     digitalWrite(GPIO_ULTRASONIC_TRIG, LOW);
-    
+#ifndef ULTRASONIC_USE_PULSEIN
+    attachInterrupt(digitalPinToInterrupt(GPIO_ULTRASONIC_ECHO), echo_isr, CHANGE);
+#endif
+
     // Initialize GPIO states
     digitalWrite(GPIO_MOTOR_IN3, LOW);
     digitalWrite(GPIO_MOTOR_IN4, LOW);
@@ -28,7 +80,9 @@ void hardware_init(void) {
     steerServo.attach(GPIO_SERVO, 500, 2500);
     steerServo.write(SERVO_CENTER);
 
-    // UART to the Jetson
+    // UART to the Jetson. 921600 baud fills the default 256-byte RX buffer in
+    // under 3 ms, so give it room for a burst between two 10 ms polls.
+    Serial1.setRxBufferSize(1024);
     Serial1.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
 
     log_line("Hardware initialized");
@@ -69,30 +123,41 @@ bool estop_is_triggered(void) {
 }
 
 uint16_t ultrasonic_read_cm(void) {
-    // Send trigger pulse (10us HIGH)
+#ifndef ULTRASONIC_USE_PULSEIN
+    // Only the ultrasonic task calls this. Clear any stale notification, arm
+    // the ISR, then trigger.
+    echo_waiter = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, 0);
+    echo_rising_seen = false;
+    echo_width_us = 0;
+    echo_waiting = true;
+#endif
+
+    // Trigger pulse (10 us HIGH)
     digitalWrite(GPIO_ULTRASONIC_TRIG, LOW);
     delayMicroseconds(2);
     digitalWrite(GPIO_ULTRASONIC_TRIG, HIGH);
     delayMicroseconds(10);
     digitalWrite(GPIO_ULTRASONIC_TRIG, LOW);
-    
-    // Read echo pulse duration
-    uint32_t duration = pulseIn(GPIO_ULTRASONIC_ECHO, HIGH, 30000); // 30ms timeout (~5m max)
-    
-    if (duration == 0) {
-        // Timeout or no echo
+
+#ifndef ULTRASONIC_USE_PULSEIN
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(ULTRASONIC_ECHO_TIMEOUT_MS)) == 0)
+    {
+        echo_waiting = false; // timeout: no echo; a late edge is ignored
         return 0;
     }
-    
-    // Calculate distance: distance = (duration * speed_of_sound) / 2
-    // speed_of_sound = 343 m/s = 0.0343 cm/us
-    // distance_cm = (duration_us * 0.0343) / 2 = duration_us / 58.2
-    uint16_t distance_cm = duration / 58;
-    
-    // Validate range
-    if (distance_cm < ULTRASONIC_MIN_DISTANCE_CM || distance_cm > ULTRASONIC_MAX_DISTANCE_CM) {
-        return 0; // Invalid reading
+    const uint32_t duration = echo_width_us;
+#else
+    const uint32_t duration = pulseIn(GPIO_ULTRASONIC_ECHO, HIGH, ULTRASONIC_ECHO_TIMEOUT_MS * 1000UL);
+#endif
+    if (duration == 0) {
+        return 0; // no echo
     }
-    
-    return distance_cm;
+
+    // distance = duration * speed_of_sound / 2 = duration_us / 58 (343 m/s)
+    const uint32_t distance_cm = duration / 58;
+    if (distance_cm < ULTRASONIC_MIN_DISTANCE_CM || distance_cm > ULTRASONIC_MAX_DISTANCE_CM) {
+        return 0; // out of range: not a valid reading
+    }
+    return (uint16_t)distance_cm;
 }

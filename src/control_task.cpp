@@ -21,8 +21,13 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// Commands from LinkRxTask (core 1) to ControlTask (core 0).
+// Commands from LinkRxTask / SupervisorTask (core 1) to ControlTask (core 0).
 // A sequence number per command marks it as new; ControlTask consumes it once.
+//
+// A brake goes through the SAME slot as the speed (speed 0, seq++), so the
+// order of arrival decides: SET_SPEED then BRAKE_NOW ends braked, BRAKE_NOW
+// then SET_SPEED ends moving. A separate brake flag lost the brake when a
+// SET_SPEED arrived just before it in the same cycle.
 // ---------------------------------------------------------------------------
 typedef struct {
     int32_t speed;
@@ -30,12 +35,12 @@ typedef struct {
     int32_t angle;
     uint32_t steer_seq;
     bool forward;
-    bool brake;
+    uint32_t brake_events; // E:BRAKE_NOW received, to confirm them after acting
 } commands_t;
 
-static commands_t cmds = {0, 0, SERVO_CENTER, 0, true, false};
+static commands_t cmds = {0, 0, SERVO_CENTER, 0, true, 0};
 static portMUX_TYPE cmds_lock = portMUX_INITIALIZER_UNLOCKED;
-static TaskHandle_t control_handle = NULL;
+static TaskHandle_t volatile control_handle = NULL;
 
 void control_set_speed(int32_t speed)
 {
@@ -60,19 +65,28 @@ void control_set_direction(bool forward)
     taskEXIT_CRITICAL(&cmds_lock);
 }
 
-void control_brake(void)
+static void drop_speed(bool confirm)
 {
     taskENTER_CRITICAL(&cmds_lock);
-    cmds.brake = true;
+    cmds.speed = 0;
+    cmds.speed_seq++;
+    if (confirm)
+    {
+        cmds.brake_events++;
+    }
     taskEXIT_CRITICAL(&cmds_lock);
     control_wake();
 }
 
+void control_brake(void) { drop_speed(true); }
+void control_drop_speed(void) { drop_speed(false); }
+
 void control_wake(void)
 {
-    if (control_handle != NULL)
+    TaskHandle_t h = control_handle;
+    if (h != NULL)
     {
-        xTaskNotifyGive(control_handle);
+        xTaskNotifyGive(h);
     }
 }
 
@@ -84,58 +98,76 @@ static int32_t clamp(int32_t v, int32_t lo, int32_t hi)
 }
 
 // ---------------------------------------------------------------------------
-// Traction. applied_dir: -1 braked (IN3=IN4=LOW), 0 backward, 1 forward.
+// Traction.
+//   applied_dir: what IN3/IN4 are now: -1 braked (both LOW), 0 back, 1 forward.
+//   last_dir:    the last direction the motor was DRIVEN in (-1 = never).
+//   pwm_off_ms:  when the PWM was last cut after driving.
+//
+// The dead time is measured from the last time the bridge was energised the
+// OTHER way, whatever happened in between. Braking (SET_SPEED:0, BRAKE_NOW, an
+// obstacle) leaves the motor spinning by inertia, so "braked" is not "safe to
+// reverse": checking only the current pins let a reverse through 10-20 ms
+// after the brake.
 // ---------------------------------------------------------------------------
 static int8_t applied_dir = -1;
-static bool reversing = false;
-static uint32_t reverse_since = 0;
+static int8_t last_dir = -1;
+static bool pwm_on = false;
+static uint32_t pwm_off_ms = 0;
 
-static void traction_brake(void)
+static void pwm_cut(uint32_t now)
 {
-    motor_stop();
-    applied_dir = -1;
-    reversing = false;
+    if (pwm_on)
+    {
+        pwm_on = false;
+        pwm_off_ms = now;
+    }
 }
 
-// Applies `speed` in direction `forward`, never flipping the bridge while
-// energised. Non-blocking: during the dead time the loop keeps running, so a
-// brake or a state change is still handled on the next cycle.
+static void traction_brake(uint32_t now)
+{
+    motor_stop();
+    pwm_cut(now);
+    applied_dir = -1;
+}
+
+// Applies `speed` in direction `forward`. Non-blocking: during the dead time
+// the loop keeps running, so a brake or a state change is still handled on the
+// next cycle.
 static void traction_drive(uint8_t speed, bool forward, uint32_t now)
 {
     if (speed == 0)
     {
-        traction_brake();
+        traction_brake(now);
         return;
     }
     const int8_t want = forward ? 1 : 0;
     if (applied_dir == want)
     {
-        reversing = false;
         motor_set_speed(speed);
+        pwm_on = true;
+        last_dir = want;
+        return;
     }
-    else if (applied_dir < 0)
+    if (last_dir >= 0 && last_dir != want)
     {
-        // Braked: pins LOW, PWM 0, so switching is safe right now.
-        motor_set_direction(forward);
-        applied_dir = want;
-        motor_set_speed(speed);
-    }
-    else
-    {
-        motor_set_speed(0);
-        if (!reversing)
+        // Reversing with respect to the last motion: cut the PWM (keep the
+        // pins as they are) and wait out the dead time.
+        if (pwm_on)
         {
-            reversing = true;
-            reverse_since = now;
+            motor_set_speed(0);
+            pwm_cut(now);
+            return;
         }
-        else if (now - reverse_since >= MOTOR_DIRECTION_DEADTIME_MS)
+        if (now - pwm_off_ms < MOTOR_DIRECTION_DEADTIME_MS)
         {
-            motor_set_direction(forward);
-            applied_dir = want;
-            reversing = false;
-            motor_set_speed(speed);
+            return;
         }
     }
+    motor_set_direction(forward);
+    applied_dir = want;
+    motor_set_speed(speed);
+    pwm_on = true;
+    last_dir = want;
 }
 
 void control_task(void *pvParameters)
@@ -147,7 +179,8 @@ void control_task(void *pvParameters)
     uint16_t angle = SERVO_CENTER; // what the servo is at
     uint32_t seen_speed_seq = 0;
     uint32_t seen_steer_seq = 0;
-    bool ignored_logged = false;
+    uint32_t seen_brake_events = 0;
+    bool rejected_reported = false; // one CMD_REJECTED per blocked episode
     int32_t pending_angle = SERVO_CENTER;
     bool steer_pending = false;
 
@@ -159,13 +192,14 @@ void control_task(void *pvParameters)
 
         taskENTER_CRITICAL(&cmds_lock);
         const commands_t c = cmds;
-        cmds.brake = false;
         taskEXIT_CRITICAL(&cmds_lock);
 
         const bool new_speed = c.speed_seq != seen_speed_seq;
         const bool new_steer = c.steer_seq != seen_steer_seq;
+        const bool braked_now = c.brake_events != seen_brake_events;
         seen_speed_seq = c.speed_seq;
         seen_steer_seq = c.steer_seq;
+        seen_brake_events = c.brake_events;
 
         const system_state_t state = supervisor_get_state();
         const bool armed = (state == STATE_RUNNING || state == STATE_STOPPED);
@@ -179,34 +213,24 @@ void control_task(void *pvParameters)
         const bool can_move = armed && !latched && !toward_obstacle;
         const bool can_steer = armed && !latched;
 
-        // ---- Traction --------------------------------------------------
-        if (c.brake)
-        {
-            event_line("EVENT:CMD_EXECUTED:BRAKE_NOW");
-            speed = 0;
-        }
-
+        // ---- Traction: act first, report after ------------------------
+        const uint8_t old_speed = speed;
+        const char *rejected = NULL;
         if (new_speed)
         {
             if (can_move)
             {
-                const uint8_t s = (uint8_t)clamp(c.speed, 0, MOTOR_SPEED_MAX);
-                if (s != speed)
-                {
-                    event_linef("EVENT:CMD_EXECUTED:SET_SPEED:%u", (unsigned)s);
-                }
-                speed = s;
-                ignored_logged = false;
+                speed = (uint8_t)clamp(c.speed, 0, MOTOR_SPEED_MAX);
             }
-            else if (!ignored_logged)
+            else if (c.speed > 0 && !rejected_reported)
             {
-                log_linef("[Control] SET_SPEED ignored (%s)", supervisor_state_name(state));
-                ignored_logged = true;
+                rejected = !armed ? supervisor_state_name(state) : latched ? "SYS_STOP" : "OBSTACLE";
+                rejected_reported = true;
             }
         }
-
         if (can_move)
         {
+            rejected_reported = false;
             traction_drive(speed, c.forward, now);
         }
         else
@@ -216,15 +240,29 @@ void control_task(void *pvParameters)
             // itself when the stop clears. The Jetson has to send a new
             // C:SET_SPEED (backing away from an obstacle is allowed).
             speed = 0;
-            traction_brake();
+            traction_brake(now);
+        }
+
+        if (braked_now)
+        {
+            event_line("EVENT:CMD_EXECUTED:BRAKE_NOW");
+        }
+        if (speed != old_speed && can_move)
+        {
+            event_linef("EVENT:CMD_EXECUTED:SET_SPEED:%u", (unsigned)speed);
+        }
+        if (rejected != NULL)
+        {
+            event_linef("EVENT:CMD_REJECTED:SET_SPEED:%s", rejected);
         }
 
         // ---- Steering --------------------------------------------------
         // Not armed: center, and forget any pending command.
         // SYS_STOP: freeze where it is, but KEEP the last angle asked for and
-        // apply it on resume. An obstacle does not freeze the servo: the car
-        // may be steering while it backs away. The Jetson only sends C:SET_STEER when the angle
-        // changes, so one dropped while stopped would never be re-sent.
+        // apply it on resume (the Jetson only sends C:SET_STEER when the angle
+        // changes, so one dropped while stopped would never be re-sent).
+        // An obstacle does not freeze the servo: the car may be steering while
+        // it backs away.
         // Moving the servo on resume is harmless: speed is 0 until a new
         // C:SET_SPEED arrives.
         if (new_steer)

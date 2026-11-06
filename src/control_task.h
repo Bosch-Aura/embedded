@@ -17,7 +17,8 @@ void control_task(void *pvParameters);
 void control_set_speed(int32_t speed);   // C:SET_SPEED, latched until changed
 void control_set_steer(int32_t angle);   // C:SET_STEER
 void control_set_direction(bool forward); // C:SET_DIR, applied with dead time
-void control_brake(void);                // E:BRAKE_NOW: brake now, clear latched speed
+void control_brake(void);                // E:BRAKE_NOW: brake now, clear latched speed, confirm it
+void control_drop_speed(void);           // same without the event (DISARM, FAULT)
 
 // Run a control cycle now (state changed, brake requested).
 void control_wake(void);

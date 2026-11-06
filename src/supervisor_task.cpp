@@ -10,6 +10,42 @@
 
 typedef enum { REQ_NONE = 0, REQ_ARM, REQ_DISARM } request_t;
 
+// SYS_ARM / SYS_DISARM requests from LinkRxTask, handled IN ORDER. A single
+// "last one wins" slot let DISARM followed by ARM within one cycle skip the
+// DISARM entirely: no brake, latched speed kept, car still driving.
+#define REQUEST_QUEUE_LEN 8
+static request_t requests[REQUEST_QUEUE_LEN];
+static uint8_t req_head = 0, req_count = 0;
+static portMUX_TYPE req_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void push_request(request_t r)
+{
+    taskENTER_CRITICAL(&req_lock);
+    if (req_count == REQUEST_QUEUE_LEN)
+    {
+        // Full (a flood of ARM/DISARM): drop the oldest, keep the newest.
+        req_head = (req_head + 1) % REQUEST_QUEUE_LEN;
+        req_count--;
+    }
+    requests[(req_head + req_count) % REQUEST_QUEUE_LEN] = r;
+    req_count++;
+    taskEXIT_CRITICAL(&req_lock);
+}
+
+static request_t pop_request(void)
+{
+    request_t r = REQ_NONE;
+    taskENTER_CRITICAL(&req_lock);
+    if (req_count > 0)
+    {
+        r = requests[req_head];
+        req_head = (req_head + 1) % REQUEST_QUEUE_LEN;
+        req_count--;
+    }
+    taskEXIT_CRITICAL(&req_lock);
+    return r;
+}
+
 // volatile: written on one core and read in a loop on the other. Without it
 // the compiler may hoist the load out of ControlTask's while(1).
 //
@@ -22,8 +58,8 @@ static volatile system_state_t current_state = STATE_RUNNING;
 #else
 static volatile system_state_t current_state = STATE_DISARMED;
 #endif
-static volatile uint32_t last_heartbeat_ms = 0; // 0 = no command yet
-static volatile int pending_request = REQ_NONE;
+static volatile uint32_t last_heartbeat_ms = 0;
+static volatile bool have_heartbeat = false; // false until the first command
 static volatile bool obstacle_active = false;
 static volatile bool stop_latched = false;
 
@@ -32,16 +68,20 @@ static uint32_t now_ms(void) { return xTaskGetTickCount() * portTICK_PERIOD_MS; 
 // Heartbeat age, measured against a clock read AFTER loading the heartbeat.
 // Reading the clock first and the heartbeat later (LinkRxTask can store a newer
 // one in between) makes the unsigned subtraction wrap to ~4e9 and the watchdog
-// fire right after every SYS_ARM.
+// fire right after every SYS_ARM. With that order, plain unsigned subtraction
+// is also correct across the 32-bit tick wrap (~49.7 days); clamping
+// "now < heartbeat" to 0 blinded the watchdog for another 49 days there.
 static bool heartbeat_age_ms(uint32_t *age_ms)
 {
-    const uint32_t heartbeat = last_heartbeat_ms;
-    if (heartbeat == 0)
+    // acquire pairs with the release in supervisor_feed_watchdog(): once
+    // have_heartbeat is seen true, last_heartbeat_ms is the stored value.
+    if (!__atomic_load_n(&have_heartbeat, __ATOMIC_ACQUIRE))
     {
         return false;
     }
+    const uint32_t heartbeat = __atomic_load_n(&last_heartbeat_ms, __ATOMIC_ACQUIRE);
     const uint32_t now = now_ms();
-    *age_ms = (now >= heartbeat) ? (now - heartbeat) : 0;
+    *age_ms = now - heartbeat;
     return true;
 }
 
@@ -52,6 +92,13 @@ static void set_state(system_state_t s)
         return;
     }
     current_state = s;
+    if (s == STATE_DISARMED || s == STATE_FAULT)
+    {
+        // Drop the latched speed explicitly, not only through the state: a
+        // re-ARM in the same cycle could otherwise come before ControlTask
+        // ever sees DISARMED/FAULT, and the old speed would still be there.
+        control_drop_speed();
+    }
     event_linef("EVENT:STATE_CHANGED:%s", supervisor_state_name(s));
     // Brake / center on this very cycle instead of waiting up to 10 ms.
     control_wake();
@@ -76,11 +123,8 @@ static void handle_request(request_t req, bool estop)
         event_line("EVENT:CMD_EXECUTED:SYS_ARM");
         break;
     case REQ_DISARM:
-        if (current_state != STATE_DISARMED)
-        {
-            set_state(STATE_DISARMED);
-            event_line("EVENT:CMD_EXECUTED:SYS_DISARM");
-        }
+        set_state(STATE_DISARMED);
+        event_line("EVENT:CMD_EXECUTED:SYS_DISARM"); // also if already disarmed
         break;
     default:
         break;
@@ -99,10 +143,10 @@ void supervisor_task(void *pvParameters)
     {
         const bool estop = estop_is_triggered();
 
-        // Consume the pending request atomically: a new one arriving between a
-        // plain read and the clear would be lost.
-        const request_t req = (request_t)__atomic_exchange_n(&pending_request, REQ_NONE, __ATOMIC_SEQ_CST);
-        handle_request(req, estop);
+        for (request_t req = pop_request(); req != REQ_NONE; req = pop_request())
+        {
+            handle_request(req, estop);
+        }
 
         if (estop && !estop_was)
         {
@@ -142,9 +186,18 @@ void supervisor_task(void *pvParameters)
     }
 }
 
-void supervisor_feed_watchdog(void) { last_heartbeat_ms = now_ms(); }
-void supervisor_request_arm(void) { pending_request = REQ_ARM; }
-void supervisor_request_disarm(void) { pending_request = REQ_DISARM; }
+void supervisor_feed_watchdog(void)
+{
+    __atomic_store_n(&last_heartbeat_ms, now_ms(), __ATOMIC_RELEASE);
+    __atomic_store_n(&have_heartbeat, true, __ATOMIC_RELEASE);
+}
+void supervisor_request_arm(void) { push_request(REQ_ARM); }
+void supervisor_request_disarm(void)
+{
+    // Stop now; the state change follows on the next supervisor cycle.
+    control_drop_speed();
+    push_request(REQ_DISARM);
+}
 // Both stop requests wake ControlTask so it brakes now, not on its next cycle.
 void supervisor_set_obstacle(bool obstacle)
 {
