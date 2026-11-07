@@ -63,9 +63,11 @@ cualquiera --E-STOP / watchdog--> FAULT --M:SYS_ARM--> RUNNING
 | `C:SET_DIR:<0\|1>` | Sentido de marcha: `1` adelante, `0` atrás. Queda latcheado. Si hay una velocidad latcheada, invierte solo. Entre la última vez que el motor anduvo en un sentido y la primera en el contrario pasan siempre al menos 60 ms sin PWM, **aunque en el medio haya frenado** (el motor sigue girando por inercia). |
 | `C:SET_STEER:<50-160>` | Ángulo del servo: 50 = izquierda máxima, 105 = centro, 160 = derecha máxima. Fuera de rango se satura. Un ángulo pedido durante `SYS_STOP` se guarda y se aplica al reanudar. |
 
-**Umbral de arranque: 140.** Con un PWM menor el motor no arranca desde parado (fricción estática,
-medido el 2026-08-04). El firmware lo aplica igual y emite el evento, pero las ruedas no se mueven.
-Hay que mapear el rango útil por encima de ese valor.
+**Umbral de arranque: 130.** Es el PWM mínimo para que el motor se mueva desde parado (medido en
+banco el 2026-11-06 con `scripts/prueba_freno.py`). Con menos, por ejemplo 80, el motor zumba pero no
+gira (fricción estática): el firmware lo aplica igual y emite `CMD_EXECUTED:SET_SPEED`, así que el fallo
+es silencioso. Hay que mapear el rango útil por encima de ese valor. En el piso, con el auto cargado,
+puede hacer falta algo más.
 
 Conversión de grados a valores del servo (el recorrido es simétrico, ±55 alrededor de 105):
 
