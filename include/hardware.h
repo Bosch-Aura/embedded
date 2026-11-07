@@ -151,6 +151,21 @@ extern "C"
     uint16_t ultrasonic_read_cm(void); // Returns distance in cm, 0 if error/timeout
     uint32_t ultrasonic_last_echo_us(void); // Echo width of the last read, 0 if none (debug)
 
+    // Why the last ultrasonic_read_cm() returned what it did. The point is to
+    // tell "nothing in range" (the sensor fired: ECHO went HIGH, but no echo
+    // came back) from a sensor that did not answer at all.
+    typedef enum
+    {
+        US_READ_OK = 0,      // valid distance
+        US_READ_NO_ECHO,     // ECHO rose, never fell before the timeout: nothing in range
+        US_READ_TOO_FAR,     // echo past ULTRASONIC_MAX_DISTANCE_CM: nothing in range
+        US_READ_TOO_CLOSE,   // echo under ULTRASONIC_MIN_DISTANCE_CM
+        US_READ_NO_RESPONSE, // ECHO never rose: no power, loose TRIG/ECHO, dead sensor
+        US_READ_STUCK_HIGH,  // ECHO HIGH before triggering and it never came down
+    } ultrasonic_status_t;
+    ultrasonic_status_t ultrasonic_last_status(void);
+    const char *ultrasonic_status_name(ultrasonic_status_t s); // debug logs
+
 #ifdef __cplusplus
 }
 #endif

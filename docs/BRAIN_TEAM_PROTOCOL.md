@@ -115,9 +115,11 @@ entra en `FAULT`: frena, centra el servo y borra la velocidad. Esto se controla 
 
 El ultrasonido (HC-SR04) se lee cada ~60–80 ms. El eco se mide con una interrupción en los dos flancos, y
 la tarea duerme mientras espera (hasta 30 ms), sin ocupar el core del control. Con `-DULTRASONIC_USE_PULSEIN`
-se vuelve a `pulseIn()`. **Solo cuentan las lecturas válidas** (de 2 a 400 cm). Una
-lectura sin eco o fuera de rango no prueba nada (puede ser espacio abierto, un objeto muy cerca, una
-superficie blanda o un sensor muerto), así que **no frena, no despeja y no corta una cuenta**.
+se vuelve a `pulseIn()`. Para **frenar solo cuentan las lecturas válidas** (de 2 a 400 cm): una lectura
+sin eco o fuera de rango **no frena y no corta una cuenta** (un objeto muy cerca o una superficie blanda
+también pueden perder el eco). Si el pulso de ECHO de la lectura anterior sigue en alto (sin eco, el
+HC-SR04 lo deja en alto ~38 ms y algunos clones ~200 ms), se espera a que baje y 20 ms más antes de
+disparar de nuevo.
 
 - **Frena** con 3 lecturas válidas seguidas **< 30 cm** → `EVENT:OBSTACLE_DETECTED:<cm>` → `STOPPED`.
 - **Despeja** con 3 lecturas válidas seguidas **≥ 35 cm** → `EVENT:OBSTACLE_CLEARED` → `RUNNING`.
@@ -130,8 +132,12 @@ superficie blanda o un sensor muerto), así que **no frena, no despeja y no cort
   después se pide avanzar, el auto frena y se borra la velocidad.
 - Al despejarse el auto **no reanuda solo**: la Jetson tiene que reenviar la velocidad. El dashboard de
   AURA lo hace automáticamente.
-- **Si se saca el obstáculo y no queda nada dentro del alcance, no llegan lecturas lejanas válidas y el
-  auto queda detenido.** Para destrabarlo está `M:OBSTACLE_RESET:0`.
+- **Despeja también en espacio abierto**: si se saca el obstáculo y no queda nada dentro del alcance, no
+  llegan lecturas lejanas válidas, pero el sensor sigue disparando (ECHO sube) y no vuelve eco. **2 s
+  seguidos** de lecturas sin eco o lejanas (al menos 5) → `EVENT:OBSTACLE_CLEARED`. Una lectura cerca
+  (< 35 cm o < 2 cm), una lectura en que el sensor no disparó (ECHO nunca subió: sin alimentación, cable
+  suelto) o ECHO trabado en alto cortan ese tramo: **un sensor muerto nunca suelta el freno**.
+  `M:OBSTACLE_RESET:0` sigue sirviendo para soltarlo al instante.
 - Latencia medida en el simulador, desde la primera lectura cercana hasta el PWM en 0: ~120 ms con un
   sensor limpio. Con pérdida de ecos crece (porque hacen falta 3 lecturas válidas): ~150 ms con 50% de
   pérdida, ~315 ms con 75% y ~1 s con 90%.

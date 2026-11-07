@@ -79,7 +79,8 @@ sola tarea.
 4. **Watchdog**: la antigüedad del último comando se calcula con el reloj leído *después* del heartbeat,
    como resta sin signo (así también es correcta cuando el contador de ticks da la vuelta). Solo alimentan el
    watchdog los comandos reconocidos.
-5. **Ultrasonido**: solo cuentan las lecturas válidas. Un error no es evidencia de nada (ver
+5. **Ultrasonido**: para frenar solo cuentan las lecturas válidas. Para soltar el freno también vale "sin
+   eco" sostenido 2 s (el sensor disparó y no volvió nada), nunca un sensor que no responde (ver
    `ultrasonic_task.cpp`).
 6. **`setup()` pone el hardware en estado seguro antes que cualquier otra cosa** y, si alguna tarea no
    se puede crear, reinicia la placa en lugar de arrancar sin watchdog.
