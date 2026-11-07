@@ -70,7 +70,9 @@ sola tarea.
 ### Reglas de seguridad (no romperlas)
 
 1. **Fail-safe en `Control`**: si no está armado, si hay `SYS_STOP` o si se intenta avanzar contra un
-   obstáculo, el auto **frena y se borra la velocidad latcheada**. Nunca vuelve a arrancar solo.
+   obstáculo, el auto **frena**. Con `DISARMED`, `FAULT` o `SYS_STOP` se borra la velocidad latcheada y nunca
+   vuelve a arrancar solo. Con un obstáculo la velocidad se guarda y el auto **retoma solo** al despejarse
+   (`OBSTACLE_HOLD` / `OBSTACLE_RESUMED`); un `OBSTACLE_RESET`, un freno o cualquier otra parada la borran.
 2. **Nunca se invierte el puente H con PWM aplicado**: primero se corta el PWM, se esperan 60 ms
    (`MOTOR_DIRECTION_DEADTIME_MS`) y recién ahí se cambian IN3/IN4. Los 60 ms se cuentan desde la última vez
    que el motor anduvo en el otro sentido, **aunque en el medio haya frenado**: frenado no quiere decir quieto.
@@ -126,7 +128,7 @@ EVENT:OBSTACLE_DETECTED:25
 
 - `--velocidad N`: PWM a mandar. **El mínimo para que se mueva es 130**; con menos el motor zumba y no gira.
 - `--sin-reanudar`: después del primer freno deja de mandar velocidad (solo `PING`), para comprobar que el
-  auto no arranca solo al despejarse.
+  auto **retoma solo** al despejarse (`EVENT:OBSTACLE_RESUMED:<pwm>`), sin que la Jetson reenvíe nada.
 - Ctrl+C manda `SET_SPEED:0` y `SYS_DISARM` antes de salir.
 
 Cerrá cualquier monitor serie antes: el puerto lo tiene que tener solo el script. Para ver solo los logs,

@@ -13,11 +13,11 @@ Acercale un objeto al sensor: tiene que aparecer
     [Control] >>> MOTOR FRENADO por obstaculo (velocidad X -> 0)
 y la rueda tiene que parar.
 
-Con el obstaculo ahi, el firmware rechaza el SET_SPEED (CMD_REJECTED:OBSTACLE).
-Cuando lo sacas, por defecto el script vuelve a mandar velocidad y el auto
-arranca de nuevo, como haria el Brain. Con --sin-reanudar deja de mandar
-velocidad despues del primer freno (solo PING) para comprobar que el auto NO
-arranca solo.
+Con el obstaculo ahi, el firmware guarda la velocidad (EVENT:OBSTACLE_HOLD:<v>)
+y al sacarlo retoma solo (EVENT:OBSTACLE_RESUMED:<v>). Por defecto el script
+sigue mandando velocidad (redundante). Con --sin-reanudar deja de mandar
+velocidad despues del primer freno (solo PING) para comprobar que el auto
+retoma solo, sin que el Brain reenvie nada.
 
 Ctrl+C: manda C:SET_SPEED:0 y M:SYS_DISARM:0 antes de salir.
 

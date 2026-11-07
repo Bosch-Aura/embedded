@@ -223,8 +223,8 @@ f.w("M:SYS_RESUME:0", "#SIM dist 20")
 f.wait(r"OBSTACLE_DETECTED", m)
 f.w("C:SET_SPEED:200")
 time.sleep(0.1)
-report("F5 forward SET_SPEED against an obstacle -> CMD_REJECTED:SET_SPEED:OBSTACLE",
-       bool(f.since(m, r"CMD_REJECTED:SET_SPEED:OBSTACLE")), "")
+report("F5 forward SET_SPEED against an obstacle -> held for resume (OBSTACLE_HOLD:200), not rejected",
+       bool(f.since(m, r"EVENT:OBSTACLE_HOLD:200")) and not f.since(m, r"CMD_REJECTED:SET_SPEED:OBSTACLE"), "")
 f.close()
 
 # 6. Watchdog across the 32-bit tick wrap -------------------------------------
