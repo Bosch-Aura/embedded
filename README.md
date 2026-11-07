@@ -70,7 +70,9 @@ sola tarea.
 ### Reglas de seguridad (no romperlas)
 
 1. **Fail-safe en `Control`**: si no está armado, si hay `SYS_STOP` o si se intenta avanzar contra un
-   obstáculo, el auto **frena y se borra la velocidad latcheada**. Nunca vuelve a arrancar solo.
+   obstáculo, el auto **frena**. Con `DISARMED`, `FAULT` o `SYS_STOP` se borra la velocidad latcheada y nunca
+   vuelve a arrancar solo. Con un obstáculo la velocidad se guarda y el auto **retoma solo** al despejarse
+   (`OBSTACLE_HOLD` / `OBSTACLE_RESUMED`); un `OBSTACLE_RESET`, un freno o cualquier otra parada la borran.
 2. **Nunca se invierte el puente H con PWM aplicado**: primero se corta el PWM, se esperan 60 ms
    (`MOTOR_DIRECTION_DEADTIME_MS`) y recién ahí se cambian IN3/IN4. Los 60 ms se cuentan desde la última vez
    que el motor anduvo en el otro sentido, **aunque en el medio haya frenado**: frenado no quiere decir quieto.
@@ -79,7 +81,8 @@ sola tarea.
 4. **Watchdog**: la antigüedad del último comando se calcula con el reloj leído *después* del heartbeat,
    como resta sin signo (así también es correcta cuando el contador de ticks da la vuelta). Solo alimentan el
    watchdog los comandos reconocidos.
-5. **Ultrasonido**: solo cuentan las lecturas válidas. Un error no es evidencia de nada (ver
+5. **Ultrasonido**: para frenar solo cuentan las lecturas válidas. Para soltar el freno también vale "sin
+   eco" sostenido 2 s (el sensor disparó y no volvió nada), nunca un sensor que no responde (ver
    `ultrasonic_task.cpp`).
 6. **`setup()` pone el hardware en estado seguro antes que cualquier otra cosa** y, si alguna tarea no
    se puede crear, reinicia la placa en lugar de arrancar sin watchdog.
@@ -114,19 +117,19 @@ Jetson. **Las ruedas giran: levantá el auto.**
 python3 scripts/prueba_freno.py                   # arma, avanza a 150 y muestra los logs
 ```
 
-El script hace de Brain por el USB (`SYS_ARM`, `SET_DIR:1` y `SET_SPEED` a 10 Hz, que también alimenta el
-watchdog), imprime todo lo que dice la placa con hora y lo guarda en `prueba_freno_<fecha>.txt`. Al acercar
+El script hace de Brain por el USB como la Jetson: `SYS_ARM`, `SET_DIR:1`, manda `SET_SPEED` 3 veces y
+después solo `PING` a 10 Hz (el latido que alimenta el watchdog). Imprime todo lo que dice la placa con hora y lo guarda en `prueba_freno_<fecha>.txt`. Al acercar
 un objeto a menos de 30 cm tiene que aparecer:
 
 ```
 [US] >>> FRENO: obstaculo a 25 cm (umbral 30)
 EVENT:OBSTACLE_DETECTED:25
-[Control] >>> MOTOR FRENADO por obstaculo (velocidad 150 -> 0)
+[Control] >>> MOTOR FRENADO por obstaculo (velocidad 170 -> 0)
 ```
 
 - `--velocidad N`: PWM a mandar. **El mínimo para que se mueva es 130**; con menos el motor zumba y no gira.
-- `--sin-reanudar`: después del primer freno deja de mandar velocidad (solo `PING`), para comprobar que el
-  auto no arranca solo al despejarse.
+- `--veces N`: cuántas veces se manda `SET_SPEED` al principio (default 3). Al sacar el obstáculo el auto
+  tiene que **retomar solo** (`EVENT:OBSTACLE_RESUMED:<pwm>`), sin que el script reenvíe nada.
 - Ctrl+C manda `SET_SPEED:0` y `SYS_DISARM` antes de salir.
 
 Cerrá cualquier monitor serie antes: el puerto lo tiene que tener solo el script. Para ver solo los logs,

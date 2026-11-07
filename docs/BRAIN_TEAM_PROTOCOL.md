@@ -41,11 +41,15 @@ cualquiera --E-STOP / watchdog--> FAULT --M:SYS_ARM--> RUNNING
 | `FAULT` | frenado, comandos ignorados | centrado |
 
 - La placa arranca en `DISARMED`. Si se compila con `-DBOOT_ARMED`, arranca en `RUNNING`.
-- Cada vez que el auto frena por un estado (cualquiera menos `RUNNING`, o al intentar avanzar
-  contra un obstáculo), **se borra la velocidad latcheada**. El auto nunca arranca solo: después
-  hace falta un `C:SET_SPEED` nuevo.
+- Cuando el auto frena por `DISARMED`, `FAULT` o `SYS_STOP`, **se borra la velocidad latcheada**. El auto
+  no arranca solo: después hace falta un `C:SET_SPEED` nuevo.
+- **La única excepción es el obstáculo**: el ESP32 frena, **guarda la velocidad** y, cuando el camino se
+  despeja, **retoma solo a esa misma velocidad**, sin que la Jetson mande nada. Ver
+  [Caso de uso: freno y reanudación por obstáculo](#caso-de-uso-freno-y-reanudación-por-obstáculo).
 - Un `C:SET_SPEED` ignorado por el estado se informa una vez por episodio con
-  `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED|FAULT|SYS_STOP|OBSTACLE>`. Un `C:SET_STEER` ignorado no se informa.
+  `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED|FAULT|SYS_STOP>`. Durante una retención por obstáculo el
+  `SET_SPEED` no se rechaza: se guarda como velocidad de reanudación (`EVENT:OBSTACLE_HOLD:<pwm>`).
+  Un `C:SET_STEER` ignorado no se informa.
 
 ### Secuencia de inicio
 
@@ -92,7 +96,7 @@ def degrees_to_servo(deg, max_deg=45):
 | `M:SYS_DISARM:0` | → `DISARMED`: frena y centra el servo. La velocidad se borra en el acto, sin esperar al supervisor. Siempre confirma con `CMD_EXECUTED:SYS_DISARM`. |
 | `M:SYS_STOP:0` | Parada enganchada: `STOPPED`, motor frenado (en los dos sentidos) y servo congelado. **Solo la suelta `M:SYS_RESUME:0`**: sobrevive a `DISARM`, `FAULT` y a volver a armar. Un reinicio de la placa la borra. Siempre confirma con `CMD_EXECUTED:SYS_STOP`. |
 | `M:SYS_RESUME:0` | Suelta el `SYS_STOP`. No reanuda nada solo: hace falta un `C:SET_SPEED` nuevo. Si hay un obstáculo, el auto sigue en `STOPPED`. Siempre confirma con `CMD_EXECUTED:SYS_RESUME`. |
-| `M:OBSTACLE_RESET:0` | Suelta la parada por obstáculo (ver [Obstáculos](#obstáculos)). Si el obstáculo sigue ahí, en ~150 ms se vuelve a bloquear. |
+| `M:OBSTACLE_RESET:0` | Suelta la parada por obstáculo (ver [Obstáculos](#obstáculos)). Si el obstáculo sigue ahí, en ~150 ms se vuelve a bloquear. **Borra la velocidad guardada**: después de un reset el auto no retoma solo, hace falta un `C:SET_SPEED` nuevo. Siempre confirma con `CMD_EXECUTED:OBSTACLE_RESET`. |
 
 Cualquier otro comando (incluido el viejo `M:LIGHTS_*`) se ignora, queda registrado como
 `[LinkRx] unknown command` y **no alimenta el watchdog**.
@@ -115,9 +119,11 @@ entra en `FAULT`: frena, centra el servo y borra la velocidad. Esto se controla 
 
 El ultrasonido (HC-SR04) se lee cada ~60–80 ms. El eco se mide con una interrupción en los dos flancos, y
 la tarea duerme mientras espera (hasta 30 ms), sin ocupar el core del control. Con `-DULTRASONIC_USE_PULSEIN`
-se vuelve a `pulseIn()`. **Solo cuentan las lecturas válidas** (de 2 a 400 cm). Una
-lectura sin eco o fuera de rango no prueba nada (puede ser espacio abierto, un objeto muy cerca, una
-superficie blanda o un sensor muerto), así que **no frena, no despeja y no corta una cuenta**.
+se vuelve a `pulseIn()`. Para **frenar solo cuentan las lecturas válidas** (de 2 a 400 cm): una lectura
+sin eco o fuera de rango **no frena y no corta una cuenta** (un objeto muy cerca o una superficie blanda
+también pueden perder el eco). Si el pulso de ECHO de la lectura anterior sigue en alto (sin eco, el
+HC-SR04 lo deja en alto ~38 ms y algunos clones ~200 ms), se espera a que baje y 20 ms más antes de
+disparar de nuevo.
 
 - **Frena** con 3 lecturas válidas seguidas **< 30 cm** → `EVENT:OBSTACLE_DETECTED:<cm>` → `STOPPED`.
 - **Despeja** con 3 lecturas válidas seguidas **≥ 35 cm** → `EVENT:OBSTACLE_CLEARED` → `RUNNING`.
@@ -126,12 +132,18 @@ superficie blanda o un sensor muerto), así que **no frena, no despeja y no cort
   nuevo. Así, tres lecturas falsas espaciadas no suman una parada.
 - La franja de 30 a 34 cm es histéresis, para que un objeto justo en el límite no haga oscilar el freno.
 - **Solo se bloquea el avance** (el sensor mira hacia adelante; si se monta atrás, se compila con
-  `-DULTRASONIC_FACING_FORWARD=0`). Con un obstáculo delante se puede retroceder, y el servo obedece. Si
-  después se pide avanzar, el auto frena y se borra la velocidad.
-- Al despejarse el auto **no reanuda solo**: la Jetson tiene que reenviar la velocidad. El dashboard de
-  AURA lo hace automáticamente.
-- **Si se saca el obstáculo y no queda nada dentro del alcance, no llegan lecturas lejanas válidas y el
-  auto queda detenido.** Para destrabarlo está `M:OBSTACLE_RESET:0`.
+  `-DULTRASONIC_FACING_FORWARD=0`). Con un obstáculo delante se puede retroceder, y el servo obedece.
+- Al frenar, el ESP32 **guarda la velocidad** que tenía y, al despejarse, **retoma solo** a esa velocidad
+  (`EVENT:OBSTACLE_HOLD:<pwm>` al frenar, `EVENT:OBSTACLE_RESUMED:<pwm>` al retomar). La Jetson no tiene
+  que reenviar nada. Detalle y casos borde en
+  [Caso de uso: freno y reanudación por obstáculo](#caso-de-uso-freno-y-reanudación-por-obstáculo).
+- **Despeja también en espacio abierto**: si se saca el obstáculo y no queda nada dentro del alcance, no
+  llegan lecturas lejanas válidas, pero el sensor sigue disparando (ECHO sube) y no vuelve eco. **2 s
+  seguidos** de lecturas sin eco o lejanas (al menos 5) → `EVENT:OBSTACLE_CLEARED` (y retoma solo). Una
+  lectura cerca (< 35 cm o < 2 cm), una lectura en que el sensor no disparó (ECHO nunca subió: sin
+  alimentación, cable suelto) o ECHO trabado en alto cortan ese tramo: **un sensor muerto nunca suelta el
+  freno**. `M:OBSTACLE_RESET:0` sigue sirviendo para soltarlo al instante (pero no retoma solo: hay que
+  reenviar la velocidad).
 - Latencia medida en el simulador, desde la primera lectura cercana hasta el PWM en 0: ~120 ms con un
   sensor limpio. Con pérdida de ecos crece (porque hacen falta 3 lecturas válidas): ~150 ms con 50% de
   pérdida, ~315 ms con 75% y ~1 s con 90%.
@@ -154,7 +166,7 @@ bajo un mutex) y se trunca a ~157 caracteres.
 | `EVENT:SYSTEM_READY` | Terminó el arranque |
 | `EVENT:STATE_CHANGED:<DISARMED\|RUNNING\|STOPPED\|FAULT>` | Cambio de estado (al arrancar se informa el inicial) |
 | `EVENT:CMD_EXECUTED:SET_SPEED:<pwm>` | Cambió la velocidad latcheada (valor ya saturado; un freno produce `SET_SPEED:0`) |
-| `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED\|FAULT\|SYS_STOP\|OBSTACLE>` | Un `SET_SPEED` > 0 ignorado por el estado (una vez por episodio) |
+| `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED\|FAULT\|SYS_STOP>` | Un `SET_SPEED` > 0 ignorado por el estado (una vez por episodio) |
 | `EVENT:CMD_EXECUTED:SET_STEER:<ángulo>` | El servo se movió (incluye el centrado, como `SET_STEER:105`) |
 | `EVENT:CMD_EXECUTED:BRAKE_NOW` | Se aplicó `E:BRAKE_NOW` / `E:STOP` |
 | `EVENT:CMD_EXECUTED:<SYS_ARM\|SYS_DISARM\|SYS_STOP\|SYS_RESUME\|OBSTACLE_RESET>` | Se aplicó el comando. Siempre se confirma, aunque no haya cambiado nada |
@@ -162,11 +174,154 @@ bajo un mutex) y se trunca a ~157 caracteres.
 | `EVENT:ESTOP_TRIGGERED:GPIO` / `EVENT:ESTOP_RELEASED` | E-STOP físico (GPIO 4, activo en bajo) |
 | `EVENT:WATCHDOG_TIMEOUT` | Pérdida de enlace → `FAULT` |
 | `EVENT:OBSTACLE_DETECTED:<cm>` / `EVENT:OBSTACLE_CLEARED` | Ver [Obstáculos](#obstáculos) |
+| `EVENT:OBSTACLE_HOLD:<pwm>` | El obstáculo frenó el auto y el ESP32 guardó `<pwm>` para retomar. Se repite si la velocidad guardada cambia durante el bloqueo; `0` = ya no va a retomar solo |
+| `EVENT:OBSTACLE_RESUMED:<pwm>` | Se despejó el obstáculo y el auto retomó solo a `<pwm>` (le sigue `CMD_EXECUTED:SET_SPEED:<pwm>`) |
 | `EVENT:ULTRASONIC_SILENT` / `EVENT:ULTRASONIC_OK` | Salud del sensor (informativo) |
 | `EVENT:FATAL:TASK_CREATE_FAILED:<tarea>` | Falla de arranque; la placa se reinicia |
 
 Ya no existen `CMD_RECEIVED:*`, `STATE_AUTO_TRANSITION:*`, `SET_STEER_CENTER`, `EMERGENCY_BRAKE`,
 `LIGHTS_*` ni el estado `ARMED`.
+
+## Caso de uso: freno y reanudación por obstáculo
+
+El ESP32 maneja solo el freno por obstáculo **y la vuelta a la marcha**. La Jetson manda la velocidad una
+vez y después solo escucha.
+
+1. La Jetson manda `C:SET_SPEED:170` → el ESP32 va a 170 de PWM.
+2. El ultrasonido ve algo a menos de 30 cm → el ESP32 frena por su cuenta.
+3. El ESP32 avisa que está frenado por obstáculo. La Jetson no hace nada.
+4. El ultrasonido deja de ver algo cerca → el ESP32 retoma solo a 170, la velocidad que tenía antes.
+5. El ESP32 avisa que retomó la marcha. La Jetson no hace nada.
+
+"No hace nada" quiere decir que no reenvía comandos de movimiento. **El heartbeat sigue siendo obligatorio**
+(`M:PING:0` a 10–20 Hz): si se corta más de 300 ms el auto entra en `FAULT` y se pierde la velocidad guardada.
+
+### Mensajes que intervienen
+
+Jetson → ESP32 (una línea por comando, terminada en `\n`):
+
+| Línea | Uso en el caso |
+|---|---|
+| `M:SYS_ARM:0` | Armar, una vez al conectar |
+| `C:SET_DIR:1` | Adelante (hacia el sensor) |
+| `C:SET_SPEED:170` | Velocidad crucero. Queda latcheada |
+| `M:PING:0` | Heartbeat, a 10–20 Hz durante todo el caso |
+
+ESP32 → Jetson (salen por USB y UART, terminadas en `\r\n`):
+
+| Línea | Paso | Quién la emite |
+|---|---|---|
+| `EVENT:CMD_EXECUTED:SET_SPEED:170` | 1 | `control_task.cpp` |
+| `EVENT:OBSTACLE_DETECTED:<cm>` | 3 | `ultrasonic_task.cpp` |
+| `EVENT:OBSTACLE_HOLD:170` | 3: frenado por obstáculo, guardó 170 | `control_task.cpp` |
+| `EVENT:STATE_CHANGED:STOPPED` | 3 | `supervisor_task.cpp` |
+| `EVENT:OBSTACLE_CLEARED` | 5 | `ultrasonic_task.cpp` |
+| `EVENT:OBSTACLE_RESUMED:170` | 5: retomó la marcha a 170 | `control_task.cpp` |
+| `EVENT:CMD_EXECUTED:SET_SPEED:170` | 5 | `control_task.cpp` |
+| `EVENT:STATE_CHANGED:RUNNING` | 5 | `supervisor_task.cpp` |
+
+El orden dentro de cada grupo es el típico, no está garantizado: `Control`/`Ultrasonic` corren en el core 0
+y `Supervisor` en el core 1 (cada 20 ms). La Jetson tiene que tratar cada evento por separado. Para saber si
+el auto está frenado o en marcha, lo que manda es `OBSTACLE_HOLD` / `OBSTACLE_RESUMED`; `OBSTACLE_DETECTED`
+también aparece cuando el auto ya estaba quieto o iba marcha atrás, y en ese caso no hay `OBSTACLE_HOLD`.
+
+### Diagrama de secuencia
+
+```mermaid
+sequenceDiagram
+    participant J as Jetson
+    participant L as LinkRx
+    participant C as Control
+    participant U as Ultrasonic
+    participant S as Supervisor
+
+    loop siempre, 10-20 Hz
+        J->>L: M:PING:0
+    end
+    J->>L: C:SET_SPEED:170
+    L->>C: control_set_speed(170)
+    C-->>J: EVENT:CMD_EXECUTED:SET_SPEED:170
+    Note over C: PWM 170 adelante
+
+    U->>U: 3 lecturas válidas < 30 cm
+    U->>C: supervisor_set_obstacle(true) + wake
+    U-->>J: EVENT:OBSTACLE_DETECTED:25
+    Note over C: frena (IN3=IN4=LOW, PWM 0)<br/>held_speed = 170
+    C-->>J: EVENT:OBSTACLE_HOLD:170
+    S-->>J: EVENT:STATE_CHANGED:STOPPED
+    Note over J: no manda nada (solo PING)
+
+    U->>U: 3 lecturas válidas >= 35 cm
+    U->>C: supervisor_set_obstacle(false) + wake
+    U-->>J: EVENT:OBSTACLE_CLEARED
+    Note over C: speed = held_speed (170)<br/>held_speed = 0
+    C-->>J: EVENT:OBSTACLE_RESUMED:170
+    C-->>J: EVENT:CMD_EXECUTED:SET_SPEED:170
+    S-->>J: EVENT:STATE_CHANGED:RUNNING
+    Note over J: no manda nada (solo PING)
+```
+
+Versión en texto:
+
+```
+Jetson                         ESP32
+  |-- C:SET_SPEED:170 -------->|  PWM 170
+  |<-- CMD_EXECUTED:SET_SPEED:170
+  |                            |  ultrasonido: 3 válidas < 30 cm
+  |<-- OBSTACLE_DETECTED:25 ---|  frena, guarda 170
+  |<-- OBSTACLE_HOLD:170 ------|
+  |<-- STATE_CHANGED:STOPPED --|
+  |   (solo M:PING:0)          |  ultrasonido: 3 válidas >= 35 cm
+  |<-- OBSTACLE_CLEARED -------|  retoma a 170
+  |<-- OBSTACLE_RESUMED:170 ---|
+  |<-- CMD_EXECUTED:SET_SPEED:170
+  |<-- STATE_CHANGED:RUNNING --|
+```
+
+### Máquinas de estado
+
+Ultrasonido (`src/ultrasonic_task.cpp`; solo cuentan lecturas válidas):
+
+```
+LIBRE --3 válidas < 30 cm--> BLOQUEADO      (EVENT:OBSTACLE_DETECTED:<cm>)
+BLOQUEADO --3 válidas >= 35 cm--> LIBRE     (EVENT:OBSTACLE_CLEARED)
+BLOQUEADO --M:OBSTACLE_RESET:0--> LIBRE     (EVENT:CMD_EXECUTED:OBSTACLE_RESET + EVENT:OBSTACLE_CLEARED)
+```
+
+Motor (`src/control_task.cpp`). `speed` es la velocidad latcheada, `held_speed` la guardada para retomar:
+
+```
+                 C:SET_SPEED:v (v>0)
+  QUIETO (speed=0) -------------------> EN MARCHA (speed=v)
+        ^                                    |
+        | DISARM / FAULT / SYS_STOP /        | obstáculo y sentido hacia el sensor
+        | BRAKE_NOW / SET_SPEED:0 /          v
+        | OBSTACLE_RESET           RETENIDO POR OBSTÁCULO (speed=0, held_speed=v)
+        +-------------------------------- |  ^   EVENT:OBSTACLE_HOLD:v
+                                           |  |   C:SET_SPEED:w -> held_speed=w (OBSTACLE_HOLD:w)
+                                           |  +-- (0 cancela: OBSTACLE_HOLD:0, ya no retoma)
+            obstáculo despejado            v
+            EVENT:OBSTACLE_RESUMED:v --> EN MARCHA (speed=held_speed)
+```
+
+El estado del sistema (`DISARMED`/`RUNNING`/`STOPPED`/`FAULT`, ver [Estados](#estados)) acompaña:
+`RUNNING` → `STOPPED` al bloquear y `STOPPED` → `RUNNING` al despejar.
+
+### Casos borde
+
+| Situación | Qué hace el ESP32 |
+|---|---|
+| La Jetson manda `C:SET_SPEED:w` (w>0) mientras está retenido | No se mueve. Guarda `w` como nueva velocidad de reanudación y emite `EVENT:OBSTACLE_HOLD:w` (solo si cambió: reenviar 170 cada 50 ms no genera eventos). Al despejar retoma a `w`. |
+| La Jetson manda `C:SET_SPEED:0` o `E:BRAKE_NOW:0` mientras está retenido | Borra la velocidad guardada → `EVENT:OBSTACLE_HOLD:0` (más `CMD_EXECUTED:BRAKE_NOW` si fue un freno). Al despejar **no** retoma. |
+| El auto estaba quieto (speed 0) cuando apareció el obstáculo | Solo `OBSTACLE_DETECTED` y `STATE_CHANGED:STOPPED`. No hay nada que retomar. |
+| Obstáculo con el auto **marcha atrás** (`SET_DIR:0`) | El bloqueo es solo hacia adelante: sigue retrocediendo, no hay `OBSTACLE_HOLD` ni velocidad guardada. |
+| Retenido y la Jetson manda `C:SET_DIR:0` (retroceder) | El auto no arranca hacia atrás solo: queda quieto y **se descarta la velocidad guardada**. Para alejarse hace falta un `C:SET_SPEED` nuevo, que se aplica marcha atrás. Al volver adelante no retoma solo. |
+| `M:OBSTACLE_RESET:0` | Suelta el bloqueo y **borra la velocidad guardada** (`OBSTACLE_HOLD:0` si seguía retenido): un reset manual nunca arranca el auto solo, porque el obstáculo puede seguir ahí. Hay que mandar `C:SET_SPEED` de nuevo. |
+| `M:SYS_STOP:0` mientras está retenido | Gana el `SYS_STOP`: se borra la velocidad guardada. Después de `M:SYS_RESUME:0` hace falta un `C:SET_SPEED`. |
+| `M:SYS_DISARM:0`, E-STOP o watchdog (`FAULT`) mientras está retenido | Se borra la velocidad guardada. Al volver a armar hace falta un `C:SET_SPEED`. |
+| Se saca el obstáculo y no queda nada dentro del alcance (solo lecturas sin eco) | Tras **2 s seguidos** sin eco o lejos (al menos 5 lecturas) se emite `EVENT:OBSTACLE_CLEARED` y el auto **retoma solo** a la velocidad guardada (`EVENT:OBSTACLE_RESUMED:<pwm>`). Si el sensor no responde (ECHO nunca sube) o queda trabado en alto, sigue `BLOQUEADO`. |
+| `C:SET_STEER` mientras está retenido | El servo obedece (el obstáculo no congela la dirección). |
+| Velocidad guardada por debajo de 130 | Se retoma igual, pero con menos de 130 de PWM el motor no arranca desde parado (ver [Control](#control-c)). |
 
 ## Ejemplo mínimo
 
@@ -201,7 +356,8 @@ ser.write(b"C:SET_SPEED:180\n")     # ...y hay que volver a mandar la velocidad
   (no lo hace después de un `OBSTACLE_RESET`). Al armar, reenvía el ángulo. Con `FAULT`, `DISARMED` o un
   reinicio de la placa olvida la última velocidad y cancela lo que tengan programado las estrategias; lo mismo
   hacen el freno y el stop del dashboard. Tiene un botón para `OBSTACLE_RESET`. No vuelve a armar solo después de
-  un `FAULT`.
+  un `FAULT`. Desde que el firmware retoma solo, el reenvío de velocidad tras `OBSTACLE_CLEARED` es redundante
+  pero inofensivo (llega un `SET_SPEED` con el mismo valor que ya se está aplicando).
 - **`bfmc_hardware_bridge`** (ROS2): arma al conectar y manda `SET_STEER` + `SET_SPEED` a 20 Hz.
 
 ## Configuración compartida con Brain-Aura

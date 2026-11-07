@@ -36,9 +36,10 @@ typedef struct {
     uint32_t steer_seq;
     bool forward;
     uint32_t brake_events; // E:BRAKE_NOW received, to confirm them after acting
+    uint32_t forget_held;  // M:OBSTACLE_RESET received: drop the resume speed
 } commands_t;
 
-static commands_t cmds = {0, 0, SERVO_CENTER, 0, true, 0};
+static commands_t cmds = {0, 0, SERVO_CENTER, 0, true, 0, 0};
 static portMUX_TYPE cmds_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t volatile control_handle = NULL;
 
@@ -80,6 +81,14 @@ static void drop_speed(bool confirm)
 
 void control_brake(void) { drop_speed(true); }
 void control_drop_speed(void) { drop_speed(false); }
+
+void control_forget_held_speed(void)
+{
+    taskENTER_CRITICAL(&cmds_lock);
+    cmds.forget_held++;
+    taskEXIT_CRITICAL(&cmds_lock);
+    control_wake();
+}
 
 void control_wake(void)
 {
@@ -180,6 +189,11 @@ void control_task(void *pvParameters)
     uint32_t seen_speed_seq = 0;
     uint32_t seen_steer_seq = 0;
     uint32_t seen_brake_events = 0;
+    uint32_t seen_forget_held = 0;
+    // Obstacle hold: the speed the car had (or was last told) when the hold
+    // braked it. Restored by itself when the obstacle clears; 0 = nothing to
+    // resume. Any other stop, a new applied speed or OBSTACLE_RESET drops it.
+    uint8_t held_speed = 0;
     bool rejected_reported = false; // one CMD_REJECTED per blocked episode
     int32_t pending_angle = SERVO_CENTER;
     bool steer_pending = false;
@@ -190,6 +204,11 @@ void control_task(void *pvParameters)
     {
         const uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
+        // Read BEFORE the command snapshot: LinkRx flags OBSTACLE_RESET
+        // (forget_held) before asking UltrasonicTask to release, so seeing the
+        // release here guarantees the snapshot below also sees the forget.
+        const bool obstacle = supervisor_obstacle_active();
+
         taskENTER_CRITICAL(&cmds_lock);
         const commands_t c = cmds;
         taskEXIT_CRITICAL(&cmds_lock);
@@ -197,9 +216,11 @@ void control_task(void *pvParameters)
         const bool new_speed = c.speed_seq != seen_speed_seq;
         const bool new_steer = c.steer_seq != seen_steer_seq;
         const bool braked_now = c.brake_events != seen_brake_events;
+        const bool forget_held = c.forget_held != seen_forget_held;
         seen_speed_seq = c.speed_seq;
         seen_steer_seq = c.steer_seq;
         seen_brake_events = c.brake_events;
+        seen_forget_held = c.forget_held;
 
         const system_state_t state = supervisor_get_state();
         const bool armed = (state == STATE_RUNNING || state == STATE_STOPPED);
@@ -208,10 +229,12 @@ void control_task(void *pvParameters)
         //   SYS_STOP latch: nothing moves, servo frozen.
         //   obstacle:       only motion toward the sensor is blocked.
         const bool latched = supervisor_stop_latched();
-        const bool toward_obstacle = supervisor_obstacle_active() &&
-                                     (c.forward == (ULTRASONIC_FACING_FORWARD != 0));
+        const bool toward_sensor = (c.forward == (ULTRASONIC_FACING_FORWARD != 0));
+        const bool toward_obstacle = obstacle && toward_sensor;
         const bool can_move = armed && !latched && !toward_obstacle;
         const bool can_steer = armed && !latched;
+        // Braked ONLY by the obstacle: the one stop that resumes by itself.
+        const bool obstacle_hold = armed && !latched && toward_obstacle;
 
 #ifdef ULTRASONIC_DEBUG
         static bool was_toward_obstacle = false;
@@ -221,43 +244,86 @@ void control_task(void *pvParameters)
             if (toward_obstacle)
                 log_linef("[Control] >>> MOTOR FRENADO por obstaculo (velocidad %u -> 0)", (unsigned)speed);
             else
-                log_line("[Control] >>> obstaculo liberado: espera un C:SET_SPEED nuevo para moverse");
+                log_linef("[Control] >>> obstaculo liberado: retoma a la velocidad guardada (%u)", (unsigned)held_speed);
         }
 #endif
 
         // ---- Traction: act first, report after ------------------------
         const uint8_t old_speed = speed;
+        const uint8_t old_held = held_speed;
         const char *rejected = NULL;
+        bool resumed = false;
+        if (forget_held)
+        {
+            held_speed = 0; // OBSTACLE_RESET: a manual release never resumes
+        }
+        if (!can_move)
+        {
+            // Fail-safe: brake. An obstacle hold remembers the speed so the car
+            // resumes by itself when the path clears. Any other stop (not
+            // armed, SYS_STOP) clears it: the Jetson has to send a new
+            // C:SET_SPEED. Backing away from an obstacle is allowed.
+            if (!obstacle_hold)
+            {
+                held_speed = 0;
+            }
+            else if (speed > 0)
+            {
+                held_speed = speed;
+            }
+            speed = 0;
+        }
         if (new_speed)
         {
+            const uint8_t v = (uint8_t)clamp(c.speed, 0, MOTOR_SPEED_MAX);
             if (can_move)
             {
-                speed = (uint8_t)clamp(c.speed, 0, MOTOR_SPEED_MAX);
+                speed = v;
+                held_speed = 0; // a speed actually applied replaces the memory
+            }
+            else if (obstacle_hold)
+            {
+                held_speed = v; // the latest command is what resumes (0 cancels)
             }
             else if (c.speed > 0 && !rejected_reported)
             {
-                rejected = !armed ? supervisor_state_name(state) : latched ? "SYS_STOP" : "OBSTACLE";
+                rejected = !armed ? supervisor_state_name(state) : "SYS_STOP";
                 rejected_reported = true;
             }
         }
         if (can_move)
         {
             rejected_reported = false;
+            if (held_speed > 0)
+            {
+                // The hold is over. Resume only toward the sensor, i.e. because
+                // the obstacle cleared; if the Jetson turned the car around,
+                // backing away needs its own C:SET_SPEED.
+                if (toward_sensor)
+                {
+                    speed = held_speed;
+                    resumed = true;
+                }
+                held_speed = 0;
+            }
             traction_drive(speed, c.forward, now);
         }
         else
         {
-            // Fail-safe: not armed, SYS_STOP, or heading toward an obstacle
-            // brakes AND clears the latched speed, so the car never restarts by
-            // itself when the stop clears. The Jetson has to send a new
-            // C:SET_SPEED (backing away from an obstacle is allowed).
-            speed = 0;
             traction_brake(now);
         }
 
         if (braked_now)
         {
             event_line("EVENT:CMD_EXECUTED:BRAKE_NOW");
+        }
+        if (obstacle_hold && held_speed != old_held)
+        {
+            event_linef("EVENT:OBSTACLE_HOLD:%u", (unsigned)held_speed);
+        }
+        if (resumed)
+        {
+            event_linef("EVENT:OBSTACLE_RESUMED:%u", (unsigned)speed);
         }
         if (speed != old_speed && can_move)
         {
@@ -275,8 +341,8 @@ void control_task(void *pvParameters)
         // changes, so one dropped while stopped would never be re-sent).
         // An obstacle does not freeze the servo: the car may be steering while
         // it backs away.
-        // Moving the servo on resume is harmless: speed is 0 until a new
-        // C:SET_SPEED arrives.
+        // Moving the servo on resume is harmless: after SYS_STOP the speed is 0
+        // until a new C:SET_SPEED arrives.
         if (new_steer)
         {
             pending_angle = c.angle;

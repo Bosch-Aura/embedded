@@ -6,6 +6,7 @@
 #define OUTPUT 1
 #define INPUT 0
 #define INPUT_PULLUP 2
+#define INPUT_PULLDOWN 9
 #define SERIAL_8N1 0
 #define CHANGE 3
 #define ARDUINO_ISR_ATTR

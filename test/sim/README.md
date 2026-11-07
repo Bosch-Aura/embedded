@@ -37,8 +37,8 @@ mundo simulado:
 
 | Línea | Efecto |
 |---|---|
-| `#SIM dist <cm>` | El sensor ve un objeto a esa distancia (`0` = sin eco: pulso de ~38 ms, como el HC-SR04) |
-| `#SIM pattern a,b,c` | Secuencia de lecturas que se repite en ciclo (`0` = sin eco) |
+| `#SIM dist <cm>` | El sensor ve un objeto a esa distancia (`0` = sin eco: pulso de ~38 ms, como el HC-SR04; `-1` = sensor muerto, ECHO nunca sube) |
+| `#SIM pattern a,b,c` | Secuencia de lecturas que se repite en ciclo (`0` = sin eco, `-1` = sin respuesta) |
 | `#SIM dropout <p>` | Probabilidad de perder el eco en cada lectura (semilla fija: corridas reproducibles) |
 | `#SIM noise <cm>` | Ruido uniforme de ±cm |
 | `#SIM uslog 1` | Imprime cada lectura cruda (`#US raw=…`) |

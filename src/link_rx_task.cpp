@@ -130,6 +130,7 @@ static bool dispatch(char *line)
         }
         if (strcmp(cmd, "OBSTACLE_RESET") == 0)
         {
+            control_forget_held_speed(); // BEFORE the release (see ControlTask)
             ultrasonic_request_reset();
             return true;
         }

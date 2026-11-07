@@ -19,6 +19,9 @@ void control_set_steer(int32_t angle);   // C:SET_STEER
 void control_set_direction(bool forward); // C:SET_DIR, applied with dead time
 void control_brake(void);                // E:BRAKE_NOW: brake now, clear latched speed, confirm it
 void control_drop_speed(void);           // same without the event (DISARM, FAULT)
+// M:OBSTACLE_RESET: forget the speed an obstacle hold would resume at, so a
+// manual release never restarts the car by itself.
+void control_forget_held_speed(void);
 
 // Run a control cycle now (state changed, brake requested).
 void control_wake(void);

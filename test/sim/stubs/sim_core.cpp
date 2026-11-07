@@ -112,7 +112,8 @@ static void bridge_changed() {
 void Servo::write(int a) { std::lock_guard<std::mutex> g(hw_m); if (a == servo) return; servo = a; sim_out("#HW servo=" + std::to_string(a)); }
 
 // Ultrasonic model. Each read takes the next value of `pattern` (cycling);
-// 0 = no echo. Then optional dropout (no echo) and +/- noise.
+// 0 = no echo (the sensor fires: ECHO rises, nothing comes back),
+// -1 = dead sensor (ECHO never rises). Then optional dropout (no echo) and +/- noise.
 static std::mutex us_m;
 static std::vector<int> us_pattern{0};
 static size_t us_idx = 0;
@@ -144,6 +145,7 @@ static void wait_until_us(uint32_t target) {
 static void echo_pulse_async() {
     int d = us_next_cm();
     const uint32_t trig = micros();
+    if (d < 0) { if (us_log) sim_out("#US raw=dead"); return; } // dead sensor: no edges at all
     std::thread([d, trig] {
         const uint32_t rise = trig + 300;
         wait_until_us(rise);
@@ -160,8 +162,15 @@ uint32_t pulseIn(int pin, int, uint32_t timeout_us) {
     trig_pulse = false;
     int d = us_next_cm();
     uint32_t us = d > 0 ? (uint32_t)(d * 58) : 0;
-    if (d <= 0 || us > timeout_us) {           // no echo: pulseIn waits the whole timeout
+    if (d < 0) {                               // dead sensor: ECHO stays LOW
         std::this_thread::sleep_for(std::chrono::microseconds(timeout_us));
+        if (us_log) sim_out("#US raw=dead");
+        return 0;
+    }
+    if (d == 0 || us > timeout_us) {           // no echo: pulseIn waits the whole timeout
+        echo_level = 1;                        // ECHO rose and is in its ~38 ms pulse
+        std::this_thread::sleep_for(std::chrono::microseconds(timeout_us));
+        std::thread([] { std::this_thread::sleep_for(std::chrono::milliseconds(8)); echo_level = 0; }).detach();
         if (us_log) sim_out("#US raw=noecho");
         return 0;
     }
