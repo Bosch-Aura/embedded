@@ -6,18 +6,20 @@
 #include "serial_out.h"
 #include <Arduino.h>
 
-// Obstacle detection: ONLY VALID READINGS COUNT.
+// Obstacle detection.
 //
 //   valid near (< threshold)          -> evidence of an obstacle
 //   valid far  (>= threshold + margin) -> evidence of a clear path
-//   anything else (no echo, out of range, invalid) -> IGNORED
+//   no echo (sensor fired, nothing came back) -> weak evidence of a clear path,
+//                                         only used to RELEASE (see below)
+//   anything else (no rising edge, stuck ECHO, < 2 cm) -> not evidence
 //
-// An invalid reading is not evidence of anything: no echo can be open space,
-// an object too close, a soft or angled surface, or a dead sensor. So it never
-// brakes, never clears, and never breaks a run of valid readings.
+// Braking only looks at valid readings: a missing echo never brakes and never
+// breaks a run of near readings (an angled or soft obstacle can swallow it).
 //
 //   CLEAR   --N valid near in a row--> BLOCKED   (EVENT:OBSTACLE_DETECTED:<cm>)
 //   BLOCKED --N valid far in a row-->  CLEAR     (EVENT:OBSTACLE_CLEARED)
+//   BLOCKED --nothing near for ULTRASONIC_OPEN_CLEAR_MS--> CLEAR (same event)
 //
 // "In a row" means among valid readings: one valid reading of the other kind
 // restarts the count, invalid ones in between do not.
@@ -30,17 +32,31 @@
 // while CLEAR and as near while BLOCKED, so an object at the edge does not
 // toggle the brake.
 //
+// Open space. After the obstacle is removed there may be nothing within the
+// 4 m range, so no valid far reading ever comes. But the sensor still fires
+// (ECHO rises) and no echo comes back: US_READ_NO_ECHO. While BLOCKED, an
+// "open" stretch of no-echo / far readings releases the brake once it has
+// lasted ULTRASONIC_OPEN_CLEAR_MS with at least ULTRASONIC_OPEN_CLEAR_COUNT
+// readings. Any of these restarts it:
+//   - a valid near reading (also the 30-34 cm band) or one under 2 cm
+//   - a reading where the sensor did not fire (no rising edge) or ECHO is
+//     stuck HIGH: a dead or loose sensor must never release the brake
+//   - more than ULTRASONIC_EVIDENCE_MAX_GAP_MS between two readings
+// It is much slower than the far-reading path on purpose: with an object very
+// close (3-6 cm) the bench saw up to ~0.6 s of no-echo readings in a row.
+// Limit: an obstacle that loses ~90% of its echoes at random can still get
+// 2 s of silence and be released (it would also take seconds to brake for).
+//
 // BLOCKED holds the car (STOPPED). Since the sensor faces forward, only
 // forward motion is blocked: the car can still back away (see ControlTask).
 //
-// With nothing in range there are no valid far readings, so after the obstacle
-// is removed sideways the car would wait forever. M:OBSTACLE_RESET:0 releases
-// it; if the obstacle is still there, N near readings block it again.
+// M:OBSTACLE_RESET:0 still releases it at once; if the obstacle is still
+// there, N near readings block it again.
 //
 // Sensor health, informational only (never brakes):
 //   EVENT:ULTRASONIC_SILENT  no valid reading for ULTRASONIC_SILENT_MS
 //   EVENT:ULTRASONIC_OK      first valid reading after that
-// Silence can be open space or a dead sensor; the firmware cannot tell which.
+// Silence can be open space or a dead sensor (the debug log tells which).
 
 #define ULTRASONIC_TASK_PERIOD_MS 50
 
@@ -52,6 +68,12 @@
 #endif
 #ifndef ULTRASONIC_EVIDENCE_MAX_GAP_MS
 #define ULTRASONIC_EVIDENCE_MAX_GAP_MS 1000
+#endif
+#ifndef ULTRASONIC_OPEN_CLEAR_MS
+#define ULTRASONIC_OPEN_CLEAR_MS 2000
+#endif
+#ifndef ULTRASONIC_OPEN_CLEAR_COUNT
+#define ULTRASONIC_OPEN_CLEAR_COUNT 5
 #endif
 #ifndef ULTRASONIC_SILENT_MS
 #define ULTRASONIC_SILENT_MS 2000
@@ -72,6 +94,20 @@ void ultrasonic_request_reset(void)
     reset_requested = true;
 }
 
+// Brake / release, with its event. Only the ultrasonic task calls it.
+static void report_obstacle(bool blocked, uint16_t cm)
+{
+    supervisor_set_obstacle(blocked);
+    if (blocked)
+    {
+        event_linef("EVENT:OBSTACLE_DETECTED:%u", (unsigned)cm);
+    }
+    else
+    {
+        event_line("EVENT:OBSTACLE_CLEARED");
+    }
+}
+
 void ultrasonic_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -80,24 +116,29 @@ void ultrasonic_task(void *pvParameters)
     uint32_t last_run_ms = 0;  // time of the last valid reading of the run
     uint32_t last_valid_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
     bool silent = false;
+    // Open stretch while BLOCKED (no-echo or far readings, nothing near).
+    uint8_t open_count = 0;    // readings in the stretch, 0 = no stretch
+    uint32_t open_since_ms = 0;
+    uint32_t open_last_ms = 0;
 
     log_line("[Ultrasonic] started");
 
     while (1)
     {
         const uint16_t cm = ultrasonic_read_cm(); // 0 = no valid reading
+        const ultrasonic_status_t status = ultrasonic_last_status();
         const uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
         if (__atomic_exchange_n(&reset_requested, false, __ATOMIC_SEQ_CST))
         {
             event_line("EVENT:CMD_EXECUTED:OBSTACLE_RESET");
             run = 0;
+            open_count = 0;
             if (blocked)
             {
                 blocked = false;
                 US_DEBUG("[US] >>> LIBERADO por OBSTACLE_RESET");
-                supervisor_set_obstacle(false);
-                event_line("EVENT:OBSTACLE_CLEARED");
+                report_obstacle(false, 0);
             }
         }
 
@@ -139,27 +180,63 @@ void ultrasonic_task(void *pvParameters)
             {
                 blocked = near;
                 run = 0;
+                open_count = 0;
                 US_DEBUG(blocked ? "[US] >>> FRENO: obstaculo a %u cm (umbral %u)"
                                  : "[US] >>> LIBERADO: camino libre a %u cm (umbral %u)",
                          (unsigned)cm, (unsigned)ULTRASONIC_OBSTACLE_THRESHOLD_CM);
-                supervisor_set_obstacle(blocked);
-                if (blocked)
-                {
-                    event_linef("EVENT:OBSTACLE_DETECTED:%u", (unsigned)cm);
-                }
-                else
-                {
-                    event_line("EVENT:OBSTACLE_CLEARED");
-                }
+                report_obstacle(blocked, cm);
             }
         }
         else
         {
             const uint32_t echo_us = ultrasonic_last_echo_us();
             US_DEBUG("[US] INVALIDA (%s echo_us=%lu ~%lu cm) estado=%s run=%u/%u",
-                     echo_us == 0 ? "sin eco" : "fuera de rango", (unsigned long)echo_us,
+                     ultrasonic_status_name(status), (unsigned long)echo_us,
                      (unsigned long)(echo_us / 58), blocked ? "BLOQUEADO" : "LIBRE",
                      (unsigned)run, (unsigned)ULTRASONIC_DEBOUNCE_COUNT);
+        }
+
+        // Open stretch: only while BLOCKED, and only with readings where the
+        // sensor demonstrably fired and saw nothing near.
+        if (blocked)
+        {
+            const bool open_reading = (cm != 0 && cm >= ULTRASONIC_OBSTACLE_THRESHOLD_CM + ULTRASONIC_CLEAR_MARGIN_CM) ||
+                                      status == US_READ_NO_ECHO || status == US_READ_TOO_FAR;
+            if (!open_reading)
+            {
+                if (open_count > 0)
+                {
+                    US_DEBUG("[US] tramo libre cortado (%s) tras %u lecturas",
+                             cm != 0 ? "lectura cerca" : ultrasonic_status_name(status),
+                             (unsigned)open_count);
+                }
+                open_count = 0;
+            }
+            else
+            {
+                if (open_count == 0 || now - open_last_ms > ULTRASONIC_EVIDENCE_MAX_GAP_MS)
+                {
+                    open_count = 0;
+                    open_since_ms = now;
+                }
+                if (open_count < 255)
+                {
+                    open_count++;
+                }
+                open_last_ms = now;
+                US_DEBUG("[US] tramo libre %u/%u lecturas, %lu/%u ms", (unsigned)open_count,
+                         (unsigned)ULTRASONIC_OPEN_CLEAR_COUNT, (unsigned long)(now - open_since_ms),
+                         (unsigned)ULTRASONIC_OPEN_CLEAR_MS);
+                if (open_count >= ULTRASONIC_OPEN_CLEAR_COUNT && now - open_since_ms >= ULTRASONIC_OPEN_CLEAR_MS)
+                {
+                    blocked = false;
+                    run = 0;
+                    open_count = 0;
+                    US_DEBUG("[US] >>> LIBERADO: sin nada en rango durante %u ms",
+                             (unsigned)ULTRASONIC_OPEN_CLEAR_MS);
+                    report_obstacle(false, 0);
+                }
+            }
         }
 
         if (cm == 0 && !silent && now - last_valid_ms >= ULTRASONIC_SILENT_MS)
