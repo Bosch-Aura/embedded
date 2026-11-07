@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <Arduino.h>
+#include <string.h>
 
 #define CONTROL_TASK_PERIOD_MS 10 // 100 Hz
 
@@ -18,6 +19,13 @@
 // so the car can back away from something in front. 0 = sensor at the rear.
 #ifndef ULTRASONIC_FACING_FORWARD
 #define ULTRASONIC_FACING_FORWARD 1
+#endif
+
+// CMD_REJECTED:SET_SPEED is sent for every DIFFERENT speed (or reason) that is
+// rejected, at most once per this interval. A rejection that falls inside the
+// interval is sent when it ends, so the last one is never lost.
+#ifndef REJECT_REPORT_MIN_INTERVAL_MS
+#define REJECT_REPORT_MIN_INTERVAL_MS 200
 #endif
 
 // ---------------------------------------------------------------------------
@@ -42,6 +50,9 @@ typedef struct {
 static commands_t cmds = {0, 0, SERVO_CENTER, 0, true, 0, 0};
 static portMUX_TYPE cmds_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t volatile control_handle = NULL;
+// Copies of ControlTask's speed and obstacle-hold speed, for M:STATUS.
+static volatile uint8_t status_speed = 0;
+static volatile uint8_t status_held = 0;
 
 void control_set_speed(int32_t speed)
 {
@@ -89,6 +100,9 @@ void control_forget_held_speed(void)
     taskEXIT_CRITICAL(&cmds_lock);
     control_wake();
 }
+
+uint8_t control_latched_speed(void) { return status_speed; }
+uint8_t control_held_speed(void) { return status_held; }
 
 void control_wake(void)
 {
@@ -194,7 +208,14 @@ void control_task(void *pvParameters)
     // braked it. Restored by itself when the obstacle clears; 0 = nothing to
     // resume. Any other stop, a new applied speed or OBSTACLE_RESET drops it.
     uint8_t held_speed = 0;
-    bool rejected_reported = false; // one CMD_REJECTED per blocked episode
+    // CMD_REJECTED:SET_SPEED bookkeeping, see REJECT_REPORT_MIN_INTERVAL_MS.
+    int32_t reported_speed = 0;  // last rejection sent (0 = none this episode)
+    const char *reported_reason = "";
+    bool reject_pending = false; // a different rejection waits to be sent
+    int32_t pending_speed = 0;
+    const char *pending_reason = "";
+    bool reject_sent_once = false;
+    uint32_t last_reject_ms = 0;
     int32_t pending_angle = SERVO_CENTER;
     bool steer_pending = false;
 
@@ -251,7 +272,6 @@ void control_task(void *pvParameters)
         // ---- Traction: act first, report after ------------------------
         const uint8_t old_speed = speed;
         const uint8_t old_held = held_speed;
-        const char *rejected = NULL;
         bool resumed = false;
         if (forget_held)
         {
@@ -285,15 +305,21 @@ void control_task(void *pvParameters)
             {
                 held_speed = v; // the latest command is what resumes (0 cancels)
             }
-            else if (c.speed > 0 && !rejected_reported)
+            else if (c.speed > 0)
             {
-                rejected = !armed ? supervisor_state_name(state) : "SYS_STOP";
-                rejected_reported = true;
+                const char *reason = !armed ? supervisor_state_name(state) : "SYS_STOP";
+                // The same speed for the same reason again says nothing new.
+                reject_pending = c.speed != reported_speed || strcmp(reason, reported_reason) != 0;
+                pending_speed = c.speed;
+                pending_reason = reason;
             }
         }
         if (can_move)
         {
-            rejected_reported = false;
+            // Episode over: the next rejection is reported whatever its value.
+            reported_speed = 0;
+            reported_reason = "";
+            reject_pending = false;
             if (held_speed > 0)
             {
                 // The hold is over. Resume only toward the sensor, i.e. because
@@ -329,9 +355,17 @@ void control_task(void *pvParameters)
         {
             event_linef("EVENT:CMD_EXECUTED:SET_SPEED:%u", (unsigned)speed);
         }
-        if (rejected != NULL)
+        status_speed = speed;
+        status_held = held_speed;
+        if (reject_pending &&
+            (!reject_sent_once || now - last_reject_ms >= REJECT_REPORT_MIN_INTERVAL_MS))
         {
-            event_linef("EVENT:CMD_REJECTED:SET_SPEED:%s", rejected);
+            event_linef("EVENT:CMD_REJECTED:SET_SPEED:%s", pending_reason);
+            reported_speed = pending_speed;
+            reported_reason = pending_reason;
+            reject_pending = false;
+            reject_sent_once = true;
+            last_reject_ms = now;
         }
 
         // ---- Steering --------------------------------------------------

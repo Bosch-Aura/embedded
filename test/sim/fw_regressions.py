@@ -252,6 +252,133 @@ if WRAP_BIN:
            f"cut at t={now} timeout={'yes' if wd else 'no'} pwm={f.pwm()}")
     f.close()
 
+# 7. Watchdog FAULT recovers by itself; E-STOP FAULT does not ------------------
+f = boot()
+f.w("C:SET_SPEED:200")
+time.sleep(0.1)
+f.ping = False
+m = f.mark()
+f.wait(r"WATCHDOG_TIMEOUT", m, timeout=2)
+f.w("M:PING:0")  # one stray command, then silence: not stable
+time.sleep(1.0)
+report("F7 one command after a watchdog FAULT: no recovery", not f.since(m, r"WATCHDOG_RECOVERED"), "")
+m = f.mark()
+f.ping = True
+f.w("C:SET_SPEED:150")  # sent during the FAULT: must not survive the recovery
+t0 = time.time()
+rec = f.wait(r"USB EVENT:WATCHDOG_RECOVERED", m, timeout=2)
+st = f.wait(r"USB EVENT:STATE_CHANGED:RUNNING", m, timeout=2)
+dt = time.time() - t0
+time.sleep(0.1)
+report("F7 heartbeat back for ~500 ms -> WATCHDOG_RECOVERED, RUNNING, speed 0",
+       rec is not None and st is not None and rec[0] <= st[0] and 0.45 <= dt <= 0.8 and f.pwm() == 0,
+       f"after {dt * 1000:.0f} ms pwm={f.pwm()}")
+f.w("C:SET_SPEED:120")
+time.sleep(0.1)
+report("F7 after recovery a new SET_SPEED moves", f.pwm() == 120, f"pwm={f.pwm()}")
+f.close()
+
+f = boot()
+m = f.mark()
+f.w("#SIM estop 1")
+f.wait(r"STATE_CHANGED:FAULT", m)
+f.w("#SIM estop 0")
+time.sleep(1.0)
+report("F7 E-STOP FAULT with the heartbeat alive: stays FAULT",
+       not f.since(m, r"WATCHDOG_RECOVERED|STATE_CHANGED:RUNNING"), "")
+f.close()
+
+f = boot()
+f.ping = False
+m = f.mark()
+f.wait(r"WATCHDOG_TIMEOUT", m, timeout=2)
+f.ping = True
+time.sleep(0.2)
+f.w("#SIM estop 1")  # E-STOP during the watchdog FAULT takes over
+time.sleep(0.05)
+f.w("#SIM estop 0")
+time.sleep(1.0)
+report("F7 E-STOP during a watchdog FAULT: no recovery", not f.since(m, r"WATCHDOG_RECOVERED"), "")
+f.close()
+
+# 8. CMD_REJECTED:SET_SPEED for every different speed, rate limited ----------
+f = boot()
+f.w("M:SYS_STOP:0")
+time.sleep(0.1)
+m = f.mark()
+for v in (100, 150, 150):  # separate cycles: one write would keep only the last
+    f.w(f"C:SET_SPEED:{v}")
+    time.sleep(0.03)
+time.sleep(0.4)
+rej = f.since(m, r"USB EVENT:CMD_REJECTED:SET_SPEED:SYS_STOP")
+gap = rej[1][0] - rej[0][0] if len(rej) == 2 else 0
+report("F8 100 then 150 twice during SYS_STOP: 2 rejections, >= 200 ms apart", len(rej) == 2 and gap >= 200,
+       f"{len(rej)} events gap={gap} ms")
+m = f.mark()
+f.w("C:SET_SPEED:200")
+time.sleep(0.1)
+report("F8 a new speed after the interval is rejected again",
+       len(f.since(m, r"USB EVENT:CMD_REJECTED:SET_SPEED")) == 1, "")
+f.close()
+
+# 9. EVENT:STOPPED_BY ---------------------------------------------------------
+f = boot()
+m = f.mark()
+f.w("M:SYS_STOP:0")
+f.wait(r"STATE_CHANGED:STOPPED", m)
+by = f.wait(r"USB EVENT:STOPPED_BY:", m)
+report("F9 SYS_STOP -> STOPPED_BY:SYS_STOP", by is not None and by[1].endswith("SYS_STOP"), str(by))
+m = f.mark()
+f.w("#SIM dist 20")
+f.wait(r"OBSTACLE_DETECTED", m)
+time.sleep(0.05)
+f.w("M:SYS_RESUME:0")
+by = f.wait(r"USB EVENT:STOPPED_BY:OBSTACLE", m)
+report("F9 obstacle under SYS_STOP, then RESUME -> STOPPED_BY:OBSTACLE", by is not None, "")
+m = f.mark()
+f.w("M:SYS_ARM:0")
+time.sleep(0.1)
+report("F9 SYS_ARM while STOPPED repeats STOPPED_BY", bool(f.since(m, r"USB EVENT:STOPPED_BY:OBSTACLE")), "")
+f.close()
+
+f = Fw(BIN)
+f.wait(r"SYSTEM_READY", timeout=3)
+f.w("#SIM dist 200", "M:SYS_STOP:0")
+time.sleep(0.05)
+m = f.mark()
+f.w("M:SYS_ARM:0")
+f.wait(r"CMD_EXECUTED:SYS_ARM", m)
+ev = [l[4:] for _, l in f.since(m, r"USB EVENT:(STATE_CHANGED|STOPPED_BY)")]
+report("F9 arming into STOPPED reports STOPPED_BY:SYS_STOP once",
+       ev == ["EVENT:STATE_CHANGED:STOPPED", "EVENT:STOPPED_BY:SYS_STOP"], str(ev))
+f.close()
+
+# 10. M:STATUS ----------------------------------------------------------------
+f = boot()
+f.w("C:SET_SPEED:120")
+time.sleep(0.1)
+m = f.mark()
+f.w("M:STATUS:0")
+st = f.wait(r"UART EVENT:STATUS:", m)
+report("F10 M:STATUS while driving",
+       st is not None and st[1] == "UART EVENT:STATUS:RUNNING:SYS_STOP=0:OBSTACLE=0:SPEED=120:HELD=0", str(st))
+f.w("#SIM dist 20")
+f.wait(r"OBSTACLE_HOLD", m)
+time.sleep(0.05)
+m = f.mark()
+f.w("M:STATUS:0")
+st = f.wait(r"USB EVENT:STATUS:", m)
+report("F10 M:STATUS in an obstacle hold shows the speed it will resume to",
+       st is not None and st[1] == "USB EVENT:STATUS:STOPPED:SYS_STOP=0:OBSTACLE=1:SPEED=0:HELD=120", str(st))
+f.w("M:SYS_STOP:0")
+time.sleep(0.05)
+m = f.mark()
+f.w("M:STATUS:0")
+st = f.wait(r"USB EVENT:STATUS:", m)
+report("F10 M:STATUS with SYS_STOP and an obstacle (SYS_STOP drops the held speed)",
+       st is not None and st[1] == "USB EVENT:STATUS:STOPPED:SYS_STOP=1:OBSTACLE=1:SPEED=0:HELD=0", str(st))
+f.close()
+
 fails = [r for r in results if not r[1]]
 print(f"\n{len(results) - len(fails)} pass, {len(fails)} fail")
 sys.exit(1 if fails else 0)

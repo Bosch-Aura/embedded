@@ -112,6 +112,19 @@ static bool dispatch(char *line)
         {
             return true;
         }
+        if (strcmp(cmd, "STATUS") == 0)
+        {
+            // Snapshot for a client that just connected and cannot rely on
+            // the board rebooting (and replaying its events) when it opens
+            // the port.
+            event_linef("EVENT:STATUS:%s:SYS_STOP=%d:OBSTACLE=%d:SPEED=%u:HELD=%u",
+                        supervisor_state_name(supervisor_get_state()),
+                        supervisor_stop_latched() ? 1 : 0,
+                        supervisor_obstacle_active() ? 1 : 0,
+                        (unsigned)control_latched_speed(),
+                        (unsigned)control_held_speed());
+            return true;
+        }
         if (strcmp(cmd, "SYS_ARM") == 0)
         {
             supervisor_request_arm();

@@ -11,7 +11,8 @@ Fuente de verdad: `src/link_rx_task.cpp` (comandos), `src/supervisor_task.cpp` (
 - **UART externo**: GPIO 17 (TX) / 16 (RX), 921600 baud.
 - Los comandos se aceptan por los dos puertos, y **todos los `EVENT:` salen por los dos**.
 - **Abrir el puerto reinicia la placa.** Esperá `EVENT:SYSTEM_READY` antes de mandar nada, y asumí que
-  cada reconexión arranca de cero: `DISARMED` y nada latcheado.
+  cada reconexión arranca de cero: `DISARMED` y nada latcheado. Si el puerto se abre sin reiniciar la
+  placa (UART, o USB sin DTR), preguntá el estado con `M:STATUS:0`.
 
 ## Formato
 
@@ -30,6 +31,7 @@ DISARMED --M:SYS_ARM--> RUNNING <--> STOPPED      (obstáculo o M:SYS_STOP)
     ^                      |            |
     +-----M:SYS_DISARM-----+------------+
 cualquiera --E-STOP / watchdog--> FAULT --M:SYS_ARM--> RUNNING
+FAULT por watchdog --heartbeat estable 500 ms--> RUNNING (o STOPPED)
 ```
 
 | Estado | Motor | Servo |
@@ -46,10 +48,16 @@ cualquiera --E-STOP / watchdog--> FAULT --M:SYS_ARM--> RUNNING
 - **La única excepción es el obstáculo**: el ESP32 frena, **guarda la velocidad** y, cuando el camino se
   despeja, **retoma solo a esa misma velocidad**, sin que la Jetson mande nada. Ver
   [Caso de uso: freno y reanudación por obstáculo](#caso-de-uso-freno-y-reanudación-por-obstáculo).
-- Un `C:SET_SPEED` ignorado por el estado se informa una vez por episodio con
-  `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED|FAULT|SYS_STOP>`. Durante una retención por obstáculo el
+- Un `C:SET_SPEED` ignorado por el estado se informa con
+  `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED|FAULT|SYS_STOP>` **cada vez que llega una velocidad (o un motivo)
+  distinta** de la última rechazada, como mucho una vez cada 200 ms (`REJECT_REPORT_MIN_INTERVAL_MS`). Si
+  llega otra dentro de ese intervalo, se informa al terminar, así que la última nunca se pierde. Repetir la
+  misma velocidad no genera otro evento. Durante una retención por obstáculo el
   `SET_SPEED` no se rechaza: se guarda como velocidad de reanudación (`EVENT:OBSTACLE_HOLD:<pwm>`).
   Un `C:SET_STEER` ignorado no se informa.
+- Al entrar en `STOPPED`, y al mandar `M:SYS_ARM:0` estando en `STOPPED`, llega
+  `EVENT:STOPPED_BY:<SYS_STOP|OBSTACLE>`. También llega si la causa cambia sin salir de `STOPPED` (por ejemplo,
+  un obstáculo bajo un `SYS_STOP` y después `SYS_RESUME`). Si están las dos, se informa `SYS_STOP`.
 
 ### Secuencia de inicio
 
@@ -92,6 +100,7 @@ def degrees_to_servo(deg, max_deg=45):
 | Comando | Efecto |
 |---|---|
 | `M:PING:0` | Solo alimenta el watchdog. No genera respuesta. |
+| `M:STATUS:0` | Responde `EVENT:STATUS:<estado>:SYS_STOP=<0\|1>:OBSTACLE=<0\|1>:SPEED=<pwm>:HELD=<pwm>`: el estado, si el `SYS_STOP` está enganchado, si hay una parada por obstáculo, la velocidad latcheada y la guardada para retomar tras el obstáculo (`0` = ninguna). Sirve para leer el estado real al conectarse sin depender de que la placa se reinicie. Alimenta el watchdog. |
 | `M:SYS_ARM:0` | `DISARMED`/`FAULT` → `RUNNING` (o `STOPPED`, si hay una parada activa). Siempre confirma con `CMD_EXECUTED:SYS_ARM`, aunque ya estuviera armado. Con el E-STOP accionado responde `CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE`. Se aplica en ≤ 20 ms. `SYS_ARM` y `SYS_DISARM` se procesan **en orden de llegada**, aunque lleguen en el mismo ciclo. |
 | `M:SYS_DISARM:0` | → `DISARMED`: frena y centra el servo. La velocidad se borra en el acto, sin esperar al supervisor. Siempre confirma con `CMD_EXECUTED:SYS_DISARM`. |
 | `M:SYS_STOP:0` | Parada enganchada: `STOPPED`, motor frenado (en los dos sentidos) y servo congelado. **Solo la suelta `M:SYS_RESUME:0`**: sobrevive a `DISARM`, `FAULT` y a volver a armar. Un reinicio de la placa la borra. Siempre confirma con `CMD_EXECUTED:SYS_STOP`. |
@@ -112,8 +121,13 @@ entra en `FAULT`: frena, centra el servo y borra la velocidad. Esto se controla 
   del último comando.
 - Arranca a contar con el primer comando. `SYS_ARM` lo reinicia. Funciona igual cuando el contador de ticks
   de 32 bits da la vuelta (~49,7 días).
-- `FAULT` **no se borra solo**: hay que eliminar la causa y mandar `M:SYS_ARM:0`. Después hace falta un
-  `C:SET_SPEED` nuevo. El servo queda centrado, así que reenviá también el ángulo.
+- Un `FAULT` **por watchdog se borra solo**: si el heartbeat vuelve y se mantiene estable **500 ms**
+  (`WATCHDOG_RECOVERY_MS`; estable = sin huecos de más de 300 ms), llega `EVENT:WATCHDOG_RECOVERED` y el auto
+  vuelve a `RUNNING` (o a `STOPPED`, si hay una parada activa) **con la velocidad en 0**. Un `C:SET_SPEED`
+  mandado durante el `FAULT` no cuenta: hace falta uno nuevo. También se puede salir antes con `M:SYS_ARM:0`.
+- Un `FAULT` **por E-STOP no se borra solo**, aunque se suelte el botón y el enlace esté vivo: hay que mandar
+  `M:SYS_ARM:0`. Si se acciona el E-STOP durante un `FAULT` por watchdog, pasa a contar como E-STOP.
+- En los dos casos el servo queda centrado, así que reenviá también el ángulo.
 
 ## Obstáculos
 
@@ -166,13 +180,16 @@ bajo un mutex) y se trunca a ~157 caracteres.
 | `EVENT:SYSTEM_READY` | Terminó el arranque |
 | `EVENT:STATE_CHANGED:<DISARMED\|RUNNING\|STOPPED\|FAULT>` | Cambio de estado (al arrancar se informa el inicial) |
 | `EVENT:CMD_EXECUTED:SET_SPEED:<pwm>` | Cambió la velocidad latcheada (valor ya saturado; un freno produce `SET_SPEED:0`) |
-| `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED\|FAULT\|SYS_STOP>` | Un `SET_SPEED` > 0 ignorado por el estado (una vez por episodio) |
+| `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED\|FAULT\|SYS_STOP>` | Un `SET_SPEED` > 0 ignorado por el estado (cada velocidad distinta, como mucho cada 200 ms) |
+| `EVENT:STOPPED_BY:<SYS_STOP\|OBSTACLE>` | Motivo de `STOPPED`: al entrar, al armar estando en `STOPPED` y si cambia |
+| `EVENT:STATUS:<estado>:SYS_STOP=<0\|1>:OBSTACLE=<0\|1>:SPEED=<pwm>:HELD=<pwm>` | Respuesta a `M:STATUS:0` |
 | `EVENT:CMD_EXECUTED:SET_STEER:<ángulo>` | El servo se movió (incluye el centrado, como `SET_STEER:105`) |
 | `EVENT:CMD_EXECUTED:BRAKE_NOW` | Se aplicó `E:BRAKE_NOW` / `E:STOP` |
 | `EVENT:CMD_EXECUTED:<SYS_ARM\|SYS_DISARM\|SYS_STOP\|SYS_RESUME\|OBSTACLE_RESET>` | Se aplicó el comando. Siempre se confirma, aunque no haya cambiado nada |
 | `EVENT:CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE` | Intento de armar con el E-STOP accionado |
 | `EVENT:ESTOP_TRIGGERED:GPIO` / `EVENT:ESTOP_RELEASED` | E-STOP físico (GPIO 4, activo en bajo) |
 | `EVENT:WATCHDOG_TIMEOUT` | Pérdida de enlace → `FAULT` |
+| `EVENT:WATCHDOG_RECOVERED` | El heartbeat volvió estable 500 ms → `RUNNING`/`STOPPED`, velocidad en 0 |
 | `EVENT:OBSTACLE_DETECTED:<cm>` / `EVENT:OBSTACLE_CLEARED` | Ver [Obstáculos](#obstáculos) |
 | `EVENT:OBSTACLE_HOLD:<pwm>` | El obstáculo frenó el auto y el ESP32 guardó `<pwm>` para retomar. Se repite si la velocidad guardada cambia durante el bloqueo; `0` = ya no va a retomar solo |
 | `EVENT:OBSTACLE_RESUMED:<pwm>` | Se despejó el obstáculo y el auto retomó solo a `<pwm>` (le sigue `CMD_EXECUTED:SET_SPEED:<pwm>`) |
@@ -356,7 +373,8 @@ ser.write(b"C:SET_SPEED:180\n")     # ...y hay que volver a mandar la velocidad
   (no lo hace después de un `OBSTACLE_RESET`). Al armar, reenvía el ángulo. Con `FAULT`, `DISARMED` o un
   reinicio de la placa olvida la última velocidad y cancela lo que tengan programado las estrategias; lo mismo
   hacen el freno y el stop del dashboard. Tiene un botón para `OBSTACLE_RESET`. No vuelve a armar solo después de
-  un `FAULT`. Desde que el firmware retoma solo, el reenvío de velocidad tras `OBSTACLE_CLEARED` es redundante
+  un `FAULT` (ahora el firmware sale solo de un `FAULT` por watchdog). Todavía no usa `STOPPED_BY`,
+  `WATCHDOG_RECOVERED` ni `M:STATUS`. Desde que el firmware retoma solo, el reenvío de velocidad tras `OBSTACLE_CLEARED` es redundante
   pero inofensivo (llega un `SET_SPEED` con el mismo valor que ya se está aplicando).
 - **`bfmc_hardware_bridge`** (ROS2): arma al conectar y manda `SET_STEER` + `SET_SPEED` a 20 Hz.
 
