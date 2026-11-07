@@ -117,19 +117,19 @@ Jetson. **Las ruedas giran: levantá el auto.**
 python3 scripts/prueba_freno.py                   # arma, avanza a 150 y muestra los logs
 ```
 
-El script hace de Brain por el USB (`SYS_ARM`, `SET_DIR:1` y `SET_SPEED` a 10 Hz, que también alimenta el
-watchdog), imprime todo lo que dice la placa con hora y lo guarda en `prueba_freno_<fecha>.txt`. Al acercar
+El script hace de Brain por el USB como la Jetson: `SYS_ARM`, `SET_DIR:1`, manda `SET_SPEED` 3 veces y
+después solo `PING` a 10 Hz (el latido que alimenta el watchdog). Imprime todo lo que dice la placa con hora y lo guarda en `prueba_freno_<fecha>.txt`. Al acercar
 un objeto a menos de 30 cm tiene que aparecer:
 
 ```
 [US] >>> FRENO: obstaculo a 25 cm (umbral 30)
 EVENT:OBSTACLE_DETECTED:25
-[Control] >>> MOTOR FRENADO por obstaculo (velocidad 150 -> 0)
+[Control] >>> MOTOR FRENADO por obstaculo (velocidad 170 -> 0)
 ```
 
 - `--velocidad N`: PWM a mandar. **El mínimo para que se mueva es 130**; con menos el motor zumba y no gira.
-- `--sin-reanudar`: después del primer freno deja de mandar velocidad (solo `PING`), para comprobar que el
-  auto **retoma solo** al despejarse (`EVENT:OBSTACLE_RESUMED:<pwm>`), sin que la Jetson reenvíe nada.
+- `--veces N`: cuántas veces se manda `SET_SPEED` al principio (default 3). Al sacar el obstáculo el auto
+  tiene que **retomar solo** (`EVENT:OBSTACLE_RESUMED:<pwm>`), sin que el script reenvíe nada.
 - Ctrl+C manda `SET_SPEED:0` y `SYS_DISARM` antes de salir.
 
 Cerrá cualquier monitor serie antes: el puerto lo tiene que tener solo el script. Para ver solo los logs,
