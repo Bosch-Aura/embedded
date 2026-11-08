@@ -22,7 +22,7 @@ python3 jetson_sim.py build/fw_a build/fw_b           # compara dos firmwares la
 
 | Suite | Qué cubre |
 |---|---|
-| `fw_regressions.py` | Tiempo muerto aunque se pase por freno, freno contra `SET_SPEED` en el mismo ciclo, `DISARM`+`ARM` seguidos, confirmaciones, `CMD_REJECTED`, watchdog en el wrap del tick |
+| `fw_regressions.py` | Tiempo muerto aunque se pase por freno, freno contra `SET_SPEED` en el mismo ciclo, `DISARM`+`ARM` seguidos, confirmaciones, `CMD_REJECTED` (por velocidad distinta, con límite de frecuencia), watchdog en el wrap del tick, recuperación del `FAULT` por watchdog (y no por E-STOP), `STOPPED_BY`, `M:STATUS` |
 | `jetson_real.py` | Arranque, crucero, giro, cartel de pare, obstáculo, enlace perdido, marcha atrás, estacionamiento, freno, `SYS_STOP`, E-STOP, re-armado |
 | `jetson_regressions.py` | Velocidad vieja después de `FAULT`/reinicio, `OBSTACLE_RESET` sin avance, freno que cancela reanudaciones y estacionamiento, obstáculo que aborta el estacionamiento |
 | `us_tests.py` | Umbral, latencia, pérdida de ecos al azar, histéresis, evidencia que vence, reset, salud del sensor, marcha atrás |

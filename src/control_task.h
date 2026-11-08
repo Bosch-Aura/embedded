@@ -23,6 +23,11 @@ void control_drop_speed(void);           // same without the event (DISARM, FAUL
 // manual release never restarts the car by itself.
 void control_forget_held_speed(void);
 
+// As of the last control cycle, for M:STATUS: the latched speed (PWM) and the
+// speed an obstacle hold will resume to (0 = none).
+uint8_t control_latched_speed(void);
+uint8_t control_held_speed(void);
+
 // Run a control cycle now (state changed, brake requested).
 void control_wake(void);
 

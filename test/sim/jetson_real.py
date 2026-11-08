@@ -26,8 +26,21 @@ def extract(path, names, cls=None, optional=()):
     return ast.unparse(ast.Module(body=found, type_ignores=[]))
 
 
-EVENTS_SRC = extract(f"{BRAIN}/dashboard/dashboard_server.py", ["parse_system_events"],
-                     optional=["halt_jetson_motion"])
+def module_helpers(path, root):
+    """Top-level functions `root` calls, directly or through each other."""
+    funcs = {n.name: n for n in ast.parse(open(path).read()).body if isinstance(n, ast.FunctionDef)}
+    todo, seen = [root], set()
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in funcs:
+            continue
+        seen.add(name)
+        todo += [n.id for n in ast.walk(funcs[name]) if isinstance(n, ast.Name)]
+    return sorted(seen - {root})
+
+
+DASHBOARD = f"{BRAIN}/dashboard/dashboard_server.py"
+EVENTS_SRC = extract(DASHBOARD, ["parse_system_events"], optional=module_helpers(DASHBOARD, "parse_system_events"))
 AP_SRC = extract(f"{BRAIN}/lane_detection/autopilot_controller.py",
                  ["_send_servo_if_changed", "invalidate_steering"], cls="AutoPilotController",
                  optional=["resume"])
@@ -73,6 +86,8 @@ class RealCar(js.Car):
             "ultra_status_lock": threading.Lock(),
             "ultra_last_status": {"ultra_blocking": False, "dist_cm": None, "last_event_age_ms": None},
             "ultra_last_event_time": None, "ultra_safety_enabled": True,
+            "esp32_speed": {"duty": None, "held": None, "rejected": None},
+            "esp32_speed_lock": threading.Lock(),
         }
         exec(EVENTS_SRC, self.g)
 
