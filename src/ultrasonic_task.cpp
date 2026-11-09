@@ -56,7 +56,18 @@
 // Sensor health, informational only (never brakes):
 //   EVENT:ULTRASONIC_SILENT  no valid reading for ULTRASONIC_SILENT_MS
 //   EVENT:ULTRASONIC_OK      first valid reading after that
-// Silence can be open space or a dead sensor (the debug log tells which).
+// Silence can be open space or a dead sensor. These two tell them apart:
+//   EVENT:ULTRASONIC_FAULT:<NO_RESPONSE|STUCK_HIGH>
+//                            the sensor did not fire (ECHO never rose) or ECHO
+//                            stayed HIGH on every reading for ULTRASONIC_FAULT_MS:
+//                            no power, loose TRIG/ECHO, dead or latched sensor.
+//                            There is NO obstacle protection while it lasts.
+//   EVENT:ULTRASONIC_RECOVERED
+//                            first reading where the sensor fired again (valid,
+//                            no echo, too far or too close)
+// A dead sensor ends up both FAULT and SILENT; open space is only SILENT.
+// Limit: a sensor whose ECHO rises but whose receiver is dead looks like open
+// space (no echo) and is not a FAULT.
 
 #define ULTRASONIC_TASK_PERIOD_MS 50
 
@@ -78,6 +89,9 @@
 #ifndef ULTRASONIC_SILENT_MS
 #define ULTRASONIC_SILENT_MS 2000
 #endif
+#ifndef ULTRASONIC_FAULT_MS
+#define ULTRASONIC_FAULT_MS 1000 // no reading where the sensor fired -> ULTRASONIC_FAULT
+#endif
 
 // -DULTRASONIC_DEBUG: one USB log line per reading (never sent to the Jetson
 // UART) plus the brake/release decisions, to check the sensor on the bench.
@@ -88,10 +102,27 @@
 #endif
 
 static volatile bool reset_requested = false;
+static volatile ultrasonic_health_t health = US_HEALTH_OK; // for M:STATUS
 
 void ultrasonic_request_reset(void)
 {
     reset_requested = true;
+}
+
+ultrasonic_health_t ultrasonic_health(void)
+{
+    return health;
+}
+
+const char *ultrasonic_health_name(ultrasonic_health_t h)
+{
+    switch (h)
+    {
+    case US_HEALTH_OK: return "OK";
+    case US_HEALTH_SILENT: return "SILENT";
+    case US_HEALTH_FAULT: return "FAULT";
+    }
+    return "?";
 }
 
 // Brake / release, with its event. Only the ultrasonic task calls it.
@@ -116,6 +147,8 @@ void ultrasonic_task(void *pvParameters)
     uint32_t last_run_ms = 0;  // time of the last valid reading of the run
     uint32_t last_valid_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
     bool silent = false;
+    uint32_t last_fired_ms = last_valid_ms; // last reading where the sensor fired
+    bool fault = false;
     // Open stretch while BLOCKED (no-echo or far readings, nothing near).
     uint8_t open_count = 0;    // readings in the stretch, 0 = no stretch
     uint32_t open_since_ms = 0;
@@ -244,6 +277,26 @@ void ultrasonic_task(void *pvParameters)
             silent = true;
             event_line("EVENT:ULTRASONIC_SILENT");
         }
+
+        // Did the sensor fire? Only NO_RESPONSE (ECHO never rose) and
+        // STUCK_HIGH (ECHO never came down) say it did not.
+        const bool fired = status != US_READ_NO_RESPONSE && status != US_READ_STUCK_HIGH;
+        if (fired)
+        {
+            last_fired_ms = now;
+            if (fault)
+            {
+                fault = false;
+                event_line("EVENT:ULTRASONIC_RECOVERED");
+            }
+        }
+        else if (!fault && now - last_fired_ms >= ULTRASONIC_FAULT_MS)
+        {
+            fault = true;
+            event_linef("EVENT:ULTRASONIC_FAULT:%s",
+                        status == US_READ_STUCK_HIGH ? "STUCK_HIGH" : "NO_RESPONSE");
+        }
+        health = fault ? US_HEALTH_FAULT : silent ? US_HEALTH_SILENT : US_HEALTH_OK;
 
         vTaskDelay(pdMS_TO_TICKS(ULTRASONIC_TASK_PERIOD_MS));
     }

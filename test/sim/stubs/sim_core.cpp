@@ -114,6 +114,7 @@ void Servo::write(int a) { std::lock_guard<std::mutex> g(hw_m); if (a == servo) 
 // Ultrasonic model. Each read takes the next value of `pattern` (cycling);
 // 0 = no echo (the sensor fires: ECHO rises, nothing comes back),
 // -1 = dead sensor (ECHO never rises). Then optional dropout (no echo) and +/- noise.
+// `stuck 1` holds ECHO HIGH (a shorted or latched sensor) until `stuck 0`.
 static std::mutex us_m;
 static std::vector<int> us_pattern{0};
 static size_t us_idx = 0;
@@ -122,6 +123,7 @@ static int us_noise = 0;
 static bool us_log = false;
 static std::mt19937 rng(12345);
 static bool trig_pulse = false;
+static std::atomic<bool> us_stuck{false};
 static int us_next_cm() {
     std::lock_guard<std::mutex> g(us_m);
     int d = us_pattern[us_idx++ % us_pattern.size()];
@@ -197,7 +199,7 @@ void digitalWrite(int pin, int v) {
     }
 }
 int digitalRead(int pin) {
-    if (pin == GPIO_ULTRASONIC_ECHO) return echo_level;
+    if (pin == GPIO_ULTRASONIC_ECHO) return us_stuck ? 1 : (int)echo_level;
     return (pin == GPIO_ESTOP && sim_estop) ? 0 : 1;
 }
 void analogWrite(int pin, int v) {
@@ -215,6 +217,7 @@ void esp_restart() { sim_out("#HW RESTART"); std::exit(3); }
 
 static void sim_command(std::istringstream &ss, const std::string &k) {
     if (k == "dist") { int d; ss >> d; std::lock_guard<std::mutex> g(us_m); us_pattern = {d}; us_idx = 0; }
+    else if (k == "stuck") { int v; ss >> v; us_stuck = v != 0; }
     else if (k == "pattern") {            // e.g. "#SIM pattern 6,0,0,0"
         std::string list; ss >> list; std::vector<int> v; std::stringstream ls(list); std::string x;
         while (std::getline(ls, x, ',')) v.push_back(std::stoi(x));

@@ -293,6 +293,84 @@ report("U17 valid reading again -> ULTRASONIC_OK; Jetson tracked both",
        f"jetson sensor_silent {silent_flag} -> {car.g['ultra_last_status']['sensor_silent']}")
 car.close()
 
+# U18: dead sensor vs open space (ULTRASONIC_FAULT) ----------------------------
+# ULTRASONIC_SILENT cannot tell them apart; ULTRASONIC_FAULT can: the sensor
+# did not fire (ECHO never rose) or ECHO is stuck HIGH. Informational: it never
+# brakes, the Jetson decides what to do without obstacle protection.
+def status(car):
+    m = car.mark()
+    car.raw("M:STATUS:0")
+    st = car.wait(r"USB EVENT:STATUS:", since=m, timeout=1)
+    return st[1].split("EVENT:STATUS:")[1] if st else None
+
+
+car = car_running()
+st_ok = status(car)
+report("U18 M:STATUS with a working sensor -> ULTRASONIC=OK",
+       st_ok is not None and st_ok.endswith(":ULTRASONIC=OK"), str(st_ok))
+m = car.mark()
+car.sim("dist -1")
+t_set = car.now()
+flt = car.wait(r"USB EVENT:ULTRASONIC_FAULT:", since=m, timeout=3)
+lag = flt[0] - t_set if flt else None
+report("U18 sensor dies while driving -> ULTRASONIC_FAULT:NO_RESPONSE in ~1 s, still driving",
+       flt is not None and flt[1].endswith("ULTRASONIC_FAULT:NO_RESPONSE") and 800 <= lag <= 1500
+       and car.pwm > 0 and not car.seen(r"OBSTACLE_DETECTED", m),
+       f"{flt[1] if flt else None} after ~{lag} ms, pwm={car.pwm}")
+sil = car.wait(r"USB EVENT:ULTRASONIC_SILENT", since=m, timeout=3)
+report("U18 a dead sensor also ends up SILENT (the old event does not change)", sil is not None and flt is not None and sil[0] > flt[0],
+       f"silent {sil[0] - flt[0] if sil and flt else '?'} ms after the fault")
+st_dead = status(car)
+report("U18 M:STATUS with a dead sensor -> ULTRASONIC=FAULT",
+       st_dead is not None and st_dead.endswith(":ULTRASONIC=FAULT"), str(st_dead))
+m = car.mark()
+car.sim("dist 0")
+clr = car.wait(r"USB EVENT:ULTRASONIC_RECOVERED", since=m, timeout=1)
+js.settle(0.3)
+st_open = status(car)
+report("U18 sensor fires again (open space) -> ULTRASONIC_RECOVERED, still SILENT, no ULTRASONIC_OK",
+       clr is not None and not car.seen(r"ULTRASONIC_OK", m) and st_open is not None
+       and st_open.endswith(":ULTRASONIC=SILENT"), f"cleared={clr is not None} status={st_open}")
+car.close()
+
+car = car_running()
+m = car.mark()
+car.sim("dist 0")
+time.sleep(3.0)
+report("U18 open space for 3 s -> SILENT but never ULTRASONIC_FAULT",
+       car.seen(r"USB EVENT:ULTRASONIC_SILENT", m) and not car.seen(r"ULTRASONIC_FAULT", m) and car.pwm > 0,
+       f"silent={bool(car.seen('ULTRASONIC_SILENT', m))} fault={bool(car.seen('ULTRASONIC_FAULT', m))}")
+m = car.mark()
+car.sim("pattern 100,100,100,100,-1")
+time.sleep(2.0)
+report("U18 an isolated reading without a rising edge is not a fault",
+       not car.seen(r"ULTRASONIC_FAULT:", m), f"faults={len(car.seen('ULTRASONIC_FAULT:', m))}")
+m = car.mark()
+car.sim("stuck 1")
+flt = car.wait(r"USB EVENT:ULTRASONIC_FAULT:", since=m, timeout=3)
+report("U18 ECHO stuck HIGH -> ULTRASONIC_FAULT:STUCK_HIGH",
+       flt is not None and flt[1].endswith("ULTRASONIC_FAULT:STUCK_HIGH"), str(flt))
+m = car.mark()
+car.sim("stuck 0")
+car.sim("dist 100")
+clr = car.wait(r"USB EVENT:ULTRASONIC_RECOVERED", since=m, timeout=1)
+report("U18 ECHO comes down and the sensor reads again -> ULTRASONIC_RECOVERED",
+       clr is not None, f"cleared={clr is not None}")
+car.close()
+
+car = car_running()
+car.sim("dist 20")
+car.wait(r"OBSTACLE_DETECTED", timeout=2)
+m = car.mark()
+car.sim("dist -1")
+flt = car.wait(r"USB EVENT:ULTRASONIC_FAULT:", since=m, timeout=3)
+js.settle(2.5)
+st = status(car)
+report("U18 sensor dies while blocked -> ULTRASONIC_FAULT and the hold stays",
+       flt is not None and not car.seen(r"OBSTACLE_CLEARED", m) and car.pwm == 0 and st is not None
+       and ":OBSTACLE=1:" in st and st.endswith(":ULTRASONIC=FAULT"), f"status={st} pwm={car.pwm}")
+car.close()
+
 fails = [r for r in rows if r[1] is False]
 print(f"\n{sum(1 for r in rows if r[1])} pass, {len(fails)} fail, {sum(1 for r in rows if r[1] is None)} info")
 sys.exit(1 if fails else 0)

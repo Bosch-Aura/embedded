@@ -117,12 +117,13 @@ static bool dispatch(char *line)
             // Snapshot for a client that just connected and cannot rely on
             // the board rebooting (and replaying its events) when it opens
             // the port.
-            event_linef("EVENT:STATUS:%s:SYS_STOP=%d:OBSTACLE=%d:SPEED=%u:HELD=%u",
+            event_linef("EVENT:STATUS:%s:SYS_STOP=%d:OBSTACLE=%d:SPEED=%u:HELD=%u:ULTRASONIC=%s",
                         supervisor_state_name(supervisor_get_state()),
                         supervisor_stop_latched() ? 1 : 0,
                         supervisor_obstacle_active() ? 1 : 0,
                         (unsigned)control_latched_speed(),
-                        (unsigned)control_held_speed());
+                        (unsigned)control_held_speed(),
+                        ultrasonic_health_name(ultrasonic_health()));
             return true;
         }
         if (strcmp(cmd, "SYS_ARM") == 0)

@@ -100,7 +100,7 @@ def degrees_to_servo(deg, max_deg=45):
 | Comando | Efecto |
 |---|---|
 | `M:PING:0` | Solo alimenta el watchdog. No genera respuesta. |
-| `M:STATUS:0` | Responde `EVENT:STATUS:<estado>:SYS_STOP=<0\|1>:OBSTACLE=<0\|1>:SPEED=<pwm>:HELD=<pwm>`: el estado, si el `SYS_STOP` está enganchado, si hay una parada por obstáculo, la velocidad latcheada y la guardada para retomar tras el obstáculo (`0` = ninguna). Sirve para leer el estado real al conectarse sin depender de que la placa se reinicie. Alimenta el watchdog. |
+| `M:STATUS:0` | Responde `EVENT:STATUS:<estado>:SYS_STOP=<0\|1>:OBSTACLE=<0\|1>:SPEED=<pwm>:HELD=<pwm>:ULTRASONIC=<OK\|SILENT\|FAULT>`: el estado, si el `SYS_STOP` está enganchado, si hay una parada por obstáculo, la velocidad latcheada, la guardada para retomar tras el obstáculo (`0` = ninguna) y la salud del ultrasonido (ver [Obstáculos](#obstáculos)). Sirve para leer el estado real al conectarse sin depender de que la placa se reinicie. Alimenta el watchdog. |
 | `M:SYS_ARM:0` | `DISARMED`/`FAULT` → `RUNNING` (o `STOPPED`, si hay una parada activa). Siempre confirma con `CMD_EXECUTED:SYS_ARM`, aunque ya estuviera armado. Con el E-STOP accionado responde `CMD_REJECTED:SYS_ARM:ESTOP_ACTIVE`. Se aplica en ≤ 20 ms. `SYS_ARM` y `SYS_DISARM` se procesan **en orden de llegada**, aunque lleguen en el mismo ciclo. |
 | `M:SYS_DISARM:0` | → `DISARMED`: frena y centra el servo. La velocidad se borra en el acto, sin esperar al supervisor. Siempre confirma con `CMD_EXECUTED:SYS_DISARM`. |
 | `M:SYS_STOP:0` | Parada enganchada: `STOPPED`, motor frenado (en los dos sentidos) y servo congelado. **Solo la suelta `M:SYS_RESUME:0`**: sobrevive a `DISARM`, `FAULT` y a volver a armar. Un reinicio de la placa la borra. Siempre confirma con `CMD_EXECUTED:SYS_STOP`. |
@@ -164,8 +164,20 @@ disparar de nuevo.
 
 Salud del sensor (eventos **informativos**, nunca frenan):
 - `EVENT:ULTRASONIC_SILENT`: 2 s sin ninguna lectura válida. Puede ser espacio abierto o un sensor
-  desconectado; el firmware no puede saber cuál.
+  desconectado; para saber cuál, mirá `ULTRASONIC_FAULT`.
 - `EVENT:ULTRASONIC_OK`: volvió a llegar una lectura válida.
+- `EVENT:ULTRASONIC_FAULT:<NO_RESPONSE|STUCK_HIGH>`: **el sensor no está funcionando**. Durante 1 s
+  (`ULTRASONIC_FAULT_MS`) ninguna lectura lo mostró disparando: `NO_RESPONSE` = ECHO nunca subió (sin
+  alimentación, TRIG o ECHO suelto, sensor muerto), `STUCK_HIGH` = ECHO quedó trabado en alto. **Mientras
+  dure, no hay protección ante obstáculos**: el ESP32 no frena por algo que no ve. Tampoco suelta un bloqueo
+  que ya estaba (ver arriba). Qué hacer (frenar, ir más despacio, avisar) lo decide la Jetson.
+- `EVENT:ULTRASONIC_RECOVERED`: el sensor volvió a disparar (una lectura válida, sin eco o fuera de
+  rango).
+
+Un sensor muerto termina en `FAULT` y también en `SILENT`; el espacio abierto queda solo en `SILENT`. Una
+lectura suelta sin flanco no alcanza para el `FAULT`. Límite: si ECHO sube pero el receptor no recibe nada,
+para el firmware es espacio abierto. `M:STATUS:0` informa el estado actual en `ULTRASONIC=` (`FAULT` gana
+sobre `SILENT`), para quien se conecta después de que salió el evento.
 
 En el banco, cualquier cosa a menos de 30 cm (una pared, una caja, una mano) frena el auto.
 
@@ -182,7 +194,7 @@ bajo un mutex) y se trunca a ~157 caracteres.
 | `EVENT:CMD_EXECUTED:SET_SPEED:<pwm>` | Cambió la velocidad latcheada (valor ya saturado; un freno produce `SET_SPEED:0`) |
 | `EVENT:CMD_REJECTED:SET_SPEED:<DISARMED\|FAULT\|SYS_STOP>` | Un `SET_SPEED` > 0 ignorado por el estado (cada velocidad distinta, como mucho cada 200 ms) |
 | `EVENT:STOPPED_BY:<SYS_STOP\|OBSTACLE>` | Motivo de `STOPPED`: al entrar, al armar estando en `STOPPED` y si cambia |
-| `EVENT:STATUS:<estado>:SYS_STOP=<0\|1>:OBSTACLE=<0\|1>:SPEED=<pwm>:HELD=<pwm>` | Respuesta a `M:STATUS:0` |
+| `EVENT:STATUS:<estado>:SYS_STOP=<0\|1>:OBSTACLE=<0\|1>:SPEED=<pwm>:HELD=<pwm>:ULTRASONIC=<OK\|SILENT\|FAULT>` | Respuesta a `M:STATUS:0` |
 | `EVENT:CMD_EXECUTED:SET_STEER:<ángulo>` | El servo se movió (incluye el centrado, como `SET_STEER:105`) |
 | `EVENT:CMD_EXECUTED:BRAKE_NOW` | Se aplicó `E:BRAKE_NOW` / `E:STOP` |
 | `EVENT:CMD_EXECUTED:<SYS_ARM\|SYS_DISARM\|SYS_STOP\|SYS_RESUME\|OBSTACLE_RESET>` | Se aplicó el comando. Siempre se confirma, aunque no haya cambiado nada |
@@ -193,7 +205,8 @@ bajo un mutex) y se trunca a ~157 caracteres.
 | `EVENT:OBSTACLE_DETECTED:<cm>` / `EVENT:OBSTACLE_CLEARED` | Ver [Obstáculos](#obstáculos) |
 | `EVENT:OBSTACLE_HOLD:<pwm>` | El obstáculo frenó el auto y el ESP32 guardó `<pwm>` para retomar. Se repite si la velocidad guardada cambia durante el bloqueo; `0` = ya no va a retomar solo |
 | `EVENT:OBSTACLE_RESUMED:<pwm>` | Se despejó el obstáculo y el auto retomó solo a `<pwm>` (le sigue `CMD_EXECUTED:SET_SPEED:<pwm>`) |
-| `EVENT:ULTRASONIC_SILENT` / `EVENT:ULTRASONIC_OK` | Salud del sensor (informativo) |
+| `EVENT:ULTRASONIC_SILENT` / `EVENT:ULTRASONIC_OK` | Salud del sensor (informativo): sin lecturas válidas, por espacio abierto o sensor muerto |
+| `EVENT:ULTRASONIC_FAULT:<NO_RESPONSE\|STUCK_HIGH>` / `EVENT:ULTRASONIC_RECOVERED` | El sensor no dispara: sin protección ante obstáculos (informativo, no frena) |
 | `EVENT:FATAL:TASK_CREATE_FAILED:<tarea>` | Falla de arranque; la placa se reinicia |
 
 Ya no existen `CMD_RECEIVED:*`, `STATE_AUTO_TRANSITION:*`, `SET_STEER_CENTER`, `EMERGENCY_BRAKE`,
@@ -302,6 +315,7 @@ Ultrasonido (`src/ultrasonic_task.cpp`; solo cuentan lecturas válidas):
 ```
 LIBRE --3 válidas < 30 cm--> BLOQUEADO      (EVENT:OBSTACLE_DETECTED:<cm>)
 BLOQUEADO --3 válidas >= 35 cm--> LIBRE     (EVENT:OBSTACLE_CLEARED)
+BLOQUEADO --2 s sin eco o lejos (>= 5 lecturas)--> LIBRE   (EVENT:OBSTACLE_CLEARED; un sensor muerto no cuenta)
 BLOQUEADO --M:OBSTACLE_RESET:0--> LIBRE     (EVENT:CMD_EXECUTED:OBSTACLE_RESET + EVENT:OBSTACLE_CLEARED)
 ```
 
@@ -374,9 +388,10 @@ ser.write(b"C:SET_SPEED:180\n")     # ...y hay que volver a mandar la velocidad
   reinicio de la placa olvida la última velocidad y cancela lo que tengan programado las estrategias; lo mismo
   hacen el freno y el stop del dashboard. Tiene un botón para `OBSTACLE_RESET`. No vuelve a armar solo después de
   un `FAULT` (ahora el firmware sale solo de un `FAULT` por watchdog). Todavía no usa `STOPPED_BY`,
-  `WATCHDOG_RECOVERED` ni `M:STATUS`. Desde que el firmware retoma solo, el reenvío de velocidad tras `OBSTACLE_CLEARED` es redundante
+  `WATCHDOG_RECOVERED`, `M:STATUS` ni `ULTRASONIC_FAULT`. Desde que el firmware retoma solo, el reenvío de velocidad tras `OBSTACLE_CLEARED` es redundante
   pero inofensivo (llega un `SET_SPEED` con el mismo valor que ya se está aplicando).
-- **`bfmc_hardware_bridge`** (ROS2): arma al conectar y manda `SET_STEER` + `SET_SPEED` a 20 Hz.
+- **`bfmc_hardware_bridge`** (ROS2): arma al conectar y manda `SET_STEER` + `SET_SPEED` a 20 Hz. Todavía no usa
+  `ULTRASONIC_FAULT`.
 
 ## Configuración compartida con Brain-Aura
 
