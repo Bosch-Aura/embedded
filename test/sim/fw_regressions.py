@@ -361,7 +361,7 @@ m = f.mark()
 f.w("M:STATUS:0")
 st = f.wait(r"UART EVENT:STATUS:", m)
 report("F10 M:STATUS while driving",
-       st is not None and st[1] == "UART EVENT:STATUS:RUNNING:SYS_STOP=0:OBSTACLE=0:SPEED=120:HELD=0", str(st))
+       st is not None and st[1] == "UART EVENT:STATUS:RUNNING:SYS_STOP=0:OBSTACLE=0:SPEED=120:HELD=0:ULTRASONIC=OK", str(st))
 f.w("#SIM dist 20")
 f.wait(r"OBSTACLE_HOLD", m)
 time.sleep(0.05)
@@ -369,14 +369,14 @@ m = f.mark()
 f.w("M:STATUS:0")
 st = f.wait(r"USB EVENT:STATUS:", m)
 report("F10 M:STATUS in an obstacle hold shows the speed it will resume to",
-       st is not None and st[1] == "USB EVENT:STATUS:STOPPED:SYS_STOP=0:OBSTACLE=1:SPEED=0:HELD=120", str(st))
+       st is not None and st[1] == "USB EVENT:STATUS:STOPPED:SYS_STOP=0:OBSTACLE=1:SPEED=0:HELD=120:ULTRASONIC=OK", str(st))
 f.w("M:SYS_STOP:0")
 time.sleep(0.05)
 m = f.mark()
 f.w("M:STATUS:0")
 st = f.wait(r"USB EVENT:STATUS:", m)
 report("F10 M:STATUS with SYS_STOP and an obstacle (SYS_STOP drops the held speed)",
-       st is not None and st[1] == "USB EVENT:STATUS:STOPPED:SYS_STOP=1:OBSTACLE=1:SPEED=0:HELD=0", str(st))
+       st is not None and st[1] == "USB EVENT:STATUS:STOPPED:SYS_STOP=1:OBSTACLE=1:SPEED=0:HELD=0:ULTRASONIC=OK", str(st))
 f.close()
 
 fails = [r for r in results if not r[1]]

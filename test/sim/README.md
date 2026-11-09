@@ -25,7 +25,7 @@ python3 jetson_sim.py build/fw_a build/fw_b           # compara dos firmwares la
 | `fw_regressions.py` | Tiempo muerto aunque se pase por freno, freno contra `SET_SPEED` en el mismo ciclo, `DISARM`+`ARM` seguidos, confirmaciones, `CMD_REJECTED` (por velocidad distinta, con límite de frecuencia), watchdog en el wrap del tick, recuperación del `FAULT` por watchdog (y no por E-STOP), `STOPPED_BY`, `M:STATUS` |
 | `jetson_real.py` | Arranque, crucero, giro, cartel de pare, obstáculo, enlace perdido, marcha atrás, estacionamiento, freno, `SYS_STOP`, E-STOP, re-armado |
 | `jetson_regressions.py` | Velocidad vieja después de `FAULT`/reinicio, `OBSTACLE_RESET` sin avance, freno que cancela reanudaciones y estacionamiento, obstáculo que aborta el estacionamiento |
-| `us_tests.py` | Umbral, latencia, pérdida de ecos al azar, histéresis, evidencia que vence, reset, salud del sensor, marcha atrás |
+| `us_tests.py` | Umbral, latencia, pérdida de ecos al azar, histéresis, evidencia que vence, reset, salud del sensor (`SILENT`, `FAULT`: sensor muerto o ECHO trabado, distinto del espacio abierto), marcha atrás |
 
 Requisitos: un compilador de C++17 (`g++`, `clang++` o `pip install ziglang`), Python 3 y el repo
 AURA-2026 al lado de este (o `AURA_BRAIN=/ruta/a/AURA-2026/brain`).
@@ -41,6 +41,7 @@ mundo simulado:
 | `#SIM pattern a,b,c` | Secuencia de lecturas que se repite en ciclo (`0` = sin eco, `-1` = sin respuesta) |
 | `#SIM dropout <p>` | Probabilidad de perder el eco en cada lectura (semilla fija: corridas reproducibles) |
 | `#SIM noise <cm>` | Ruido uniforme de ±cm |
+| `#SIM stuck <0\|1>` | ECHO trabado en alto (sensor en corto o colgado) hasta `stuck 0` |
 | `#SIM uslog 1` | Imprime cada lectura cruda (`#US raw=…`) |
 | `#SIM estop <0\|1>` | E-STOP físico |
 | `#SIM uart <línea>` | Inyecta la línea por el UART en lugar del USB |
