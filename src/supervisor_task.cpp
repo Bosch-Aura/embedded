@@ -9,7 +9,9 @@
 #include <Arduino.h>
 
 #define SUPERVISOR_TASK_PERIOD_MS 50
-#define WATCHDOG_TIMEOUT_MS 120
+// 300 ms: with 120 ms, Python pauses on the Jetson (TensorRT/YOLO load, GIL) tripped
+// false FAULTs. Still brakes in under a third of a second if the Jetson really dies.
+#define WATCHDOG_TIMEOUT_MS 300
 
 static mailbox_t *supervisor_mb = NULL;
 static mailbox_t *motor_mb = NULL;
@@ -18,8 +20,19 @@ static mailbox_t *steer_mb = NULL;
 static system_mode_t current_mode = MODE_MANUAL;
 static system_state_t current_state = STATE_ARMED;
 static system_state_t previous_state = STATE_ARMED;
-static uint32_t last_heartbeat_ms = 0;
+static volatile uint32_t last_heartbeat_ms = 0; // written by link_rx_task
 static bool estop_triggered = false;
+
+
+// Age of the last heartbeat. last_heartbeat_ms is written by link_rx_task, so it can be
+// NEWER than a tick read earlier in this loop: an unsigned subtraction would then wrap
+// to ~4e9 ms and fire a false WATCHDOG_TIMEOUT (-> FAULT). Read "now" fresh and clamp.
+static uint32_t heartbeat_age_ms(void) {
+    uint32_t last = last_heartbeat_ms;
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    int32_t age = (int32_t)(now - last);
+    return age < 0 ? 0 : (uint32_t)age;
+}
 
 void supervisor_task(void *pvParameters) {
     supervisor_params_t *params = (supervisor_params_t *)pvParameters;
@@ -61,7 +74,9 @@ void supervisor_task(void *pvParameters) {
             if (!expired) {
                 switch (cmd) {
                     case CMD_SYS_ARM:
-                        if (current_state == STATE_DISARMED) {
+                        // ARM also clears FAULT (watchdog), unless the E-STOP is still pressed.
+                        if (current_state == STATE_DISARMED ||
+                            (current_state == STATE_FAULT && !estop_triggered)) {
                             current_state = STATE_ARMED;
                             last_heartbeat_ms = current_ms;
                             Serial.println("EVENT:CMD_EXECUTED:SYS_ARM");
@@ -131,7 +146,7 @@ void supervisor_task(void *pvParameters) {
         // Watchdog: Check heartbeat timeout
         if (current_mode == MODE_AUTO && current_state != STATE_DISARMED) {
             if (last_heartbeat_ms > 0) {
-                uint32_t heartbeat_age = current_ms - last_heartbeat_ms;
+                uint32_t heartbeat_age = heartbeat_age_ms();
                 if (heartbeat_age > WATCHDOG_TIMEOUT_MS) {
                     Serial.println("EVENT:WATCHDOG_TIMEOUT");
                     Serial.flush();
@@ -149,7 +164,7 @@ void supervisor_task(void *pvParameters) {
         if (current_state == STATE_ARMED) {
             if (current_mode == MODE_AUTO) {
                 // In AUTO mode, transition to RUNNING if we have valid heartbeat
-                if (last_heartbeat_ms > 0 && (current_ms - last_heartbeat_ms) < WATCHDOG_TIMEOUT_MS) {
+                if (last_heartbeat_ms > 0 && heartbeat_age_ms() < WATCHDOG_TIMEOUT_MS) {
                     if (current_state != STATE_RUNNING) {
                         current_state = STATE_RUNNING;
                         Serial.println("EVENT:STATE_AUTO_TRANSITION:ARMED->RUNNING");

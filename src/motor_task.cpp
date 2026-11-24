@@ -15,6 +15,18 @@
 static mailbox_t *motor_mailbox = NULL;
 static TaskHandle_t motor_task_handle = NULL;
 
+// True when the supervisor allows the motor to move (AUTO: RUNNING, MANUAL: ARMED/RUNNING).
+// In FAULT or DISARMED the motor must never move.
+static bool motor_can_move(void)
+{
+    system_state_t state = supervisor_get_state();
+    if (supervisor_get_mode() == MODE_AUTO)
+    {
+        return state == STATE_RUNNING;
+    }
+    return state == STATE_ARMED || state == STATE_RUNNING;
+}
+
 void motor_task(void *pvParameters)
 {
     motor_mailbox = (mailbox_t *)pvParameters;
@@ -46,7 +58,10 @@ void motor_task(void *pvParameters)
             lights_set_reverse(false);
             current_speed = 0;
             has_valid_command = false;
-            // Don't reset last_valid_speed or has_received_speed_command - keep them for after cooldown
+            // Forget the held speed: after the cooldown the car must stay stopped
+            // until the Jetson sends a new SET_SPEED (it resumes explicitly).
+            last_valid_speed = 0;
+            has_received_speed_command = false;
             last_stop_timestamp = current_time;
             in_cooldown = true;
             Serial.println("[MotorTask] 5 second cooldown started");
@@ -90,19 +105,26 @@ void motor_task(void *pvParameters)
                 switch (cmd)
                 {
                 case CMD_SET_SPEED: {
-                    // Check system state before allowing speed commands
-                    system_state_t state = supervisor_get_state();
-                    system_mode_t mode = supervisor_get_mode();
-                    bool can_control = false;
-                    
-                    if (mode == MODE_AUTO) {
-                        // In AUTO mode, need to be RUNNING
-                        can_control = (state == STATE_RUNNING);
-                    } else {
-                        // In MANUAL mode, ARMED is enough
-                        can_control = (state == STATE_ARMED || state == STATE_RUNNING);
+                    // SET_SPEED:0 is a stop: always honour it, in any state/mode/cooldown.
+                    if (value <= 0)
+                    {
+                        if (current_speed != 0 || has_received_speed_command)
+                        {
+                            Serial.println("EVENT:CMD_EXECUTED:SET_SPEED:0");
+                            Serial.flush();
+                        }
+                        motor_stop();
+                        lights_set_reverse(false);
+                        current_speed = 0;
+                        last_valid_speed = 0;
+                        has_received_speed_command = false;
+                        last_ignored_speed = -1;
+                        break;
                     }
-                    
+
+                    // Check system state before allowing speed commands
+                    bool can_control = motor_can_move();
+
                     if (!can_control) {
                         // Only print if this is a different command than the last ignored one
                         if (last_ignored_speed != value) {
@@ -164,7 +186,9 @@ void motor_task(void *pvParameters)
                     lights_set_reverse(false);
                     current_speed = 0;
                     motor_direction = true;
-                    // Don't reset last_valid_speed or has_received_speed_command - keep them for after cooldown
+                    // Forget the held speed so the car does not resume by itself after the cooldown.
+                    last_valid_speed = 0;
+                    has_received_speed_command = false;
                     last_stop_timestamp = current_time;
                     in_cooldown = true;
                     Serial.println("[MotorTask] Motor stopped (brake/stop command), 5 second cooldown started");
@@ -186,6 +210,17 @@ void motor_task(void *pvParameters)
         else if (has_valid_command)
         {
             // Valid command is already applied above, nothing to do here
+        }
+        else if (has_received_speed_command && !motor_can_move())
+        {
+            // FAULT (watchdog/E-STOP) or DISARMED: never hold a speed - stop and forget it.
+            motor_stop();
+            current_speed = 0;
+            last_valid_speed = 0;
+            has_received_speed_command = false;
+            motor_direction = true;
+            lights_set_reverse(false);
+            Serial.println("[MotorTask] Held speed cleared - system not RUNNING");
         }
         else if (has_received_speed_command)
         {
